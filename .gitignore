@@ -1,0 +1,7 @@
+# Build artifacts — word lists are baked into index.html
+node_modules/
+package-lock.json
+package.json
+wordlists.js
+five_letter_words.txt
+wordle.html
