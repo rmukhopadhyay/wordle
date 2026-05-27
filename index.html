@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Wordle</title>
+  <title>Twordle</title>
   <style>
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     :root{
@@ -212,7 +212,7 @@
       #board { gap: 4px; }
 
       /* Keyboard: full width, keys flex to fill space */
-      #keyboard { padding: 0 6px 16px; width: 100%; box-sizing: border-box; }
+      #keyboard { padding: 0 2px 16px; width: 100%; box-sizing: border-box; }
       .krow { gap: 5px; width: 100%; }
       .key  { min-width: 0; flex: 1; height: 50px;
               font-size: .72rem; padding: 0 2px; letter-spacing: 0; }
@@ -239,7 +239,7 @@
 <!-- ── Login ── -->
 <div id="s-login" class="screen active">
   <div class="login-body">
-    <div class="login-logo">WORDLE</div>
+    <div class="login-logo">TWORDLE</div>
     <div class="login-sub">Enter the password to play</div>
     <div class="login-eye-wrap">
       <input id="login-input" class="tinput" type="password"
@@ -255,7 +255,7 @@
 <!-- ── Home ── -->
 <div id="s-home" class="screen active">
   <div class="home-body">
-    <div class="logo">WORDLE</div>
+    <div class="logo">TWORDLE</div>
     <div class="sub">Guess the 5-letter word in 6 tries</div>
     <button id="solo-btn" class="btn btn-g">Solo Play</button>
     <button id="two-btn"  class="btn btn-o">⚔ 2 Player</button>
@@ -280,7 +280,7 @@
 <!-- ── Word Entry (3 words) ── -->
 <div id="s-word-entry" class="screen">
   <div class="ph">
-    <div class="hstack"><h1>Wordle</h1><div id="we-badge" class="badge">Setup</div></div>
+    <div class="hstack"><h1>Twordle</h1><div id="we-badge" class="badge">Setup</div></div>
   </div>
   <div class="we-body">
     <p id="we-prompt" class="we-prompt"></p>
@@ -293,7 +293,7 @@
 <!-- ── Handoff ── -->
 <div id="s-handoff" class="screen">
   <div class="ph">
-    <div class="hstack"><h1>Wordle</h1><div id="ho-badge" class="badge"></div></div>
+    <div class="hstack"><h1>Twordle</h1><div id="ho-badge" class="badge"></div></div>
   </div>
   <div class="ho-body">
     <div class="ho-icon" id="ho-icon">🔒</div>
@@ -307,7 +307,7 @@
 <div id="s-game" class="screen">
   <div id="game-header">
     <button id="game-menu-btn">⌂ Menu</button>
-    <div class="hstack"><h1>WORDLE</h1><div id="game-meta"></div></div>
+    <div class="hstack"><h1>TWORDLE</h1><div id="game-meta"></div></div>
     <button id="game-new-btn">New Game</button>
   </div>
   <div id="game-main">
@@ -320,7 +320,7 @@
 <!-- ── Round Summary ── -->
 <div id="s-round-summary" class="screen">
   <div class="ph">
-    <div class="hstack"><h1>Wordle</h1><div id="rs-badge" class="badge"></div></div>
+    <div class="hstack"><h1>Twordle</h1><div id="rs-badge" class="badge"></div></div>
   </div>
   <div class="rs-body">
     <div class="rs-label">Scoreboard</div>
@@ -333,7 +333,7 @@
 
 <!-- ── Solo Summary ── -->
 <div id="s-solo-summary" class="screen">
-  <div class="ph"><h1>Wordle</h1></div>
+  <div class="ph"><h1>Twordle</h1></div>
   <div class="ss-body">
     <div class="ss-icon" id="ss-icon"></div>
     <h2 id="ss-headline"></h2>
@@ -348,7 +348,7 @@
 
 <!-- ── Game Over ── -->
 <div id="s-game-over" class="screen">
-  <div class="ph"><h1>Wordle</h1></div>
+  <div class="ph"><h1>Twordle</h1></div>
   <div class="go-body">
     <div class="go-icon" id="go-icon">🏆</div>
     <h2 id="go-headline"></h2>
@@ -371,6 +371,8 @@ const VALID_GUESSES_EXTRA = ["aahed", "aalii", "aargh", "aarti", "abaca", "abaci
       document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
       document.getElementById(id).classList.add('active');
       window.scrollTo(0,0);
+      // Persist on every screen change (best-effort)
+      if (typeof saveState === 'function') try { saveState(); } catch(e) {}
     }
 
     // ── 2-player state ───────────────────────────────────────────────────
@@ -507,7 +509,7 @@ const VALID_GUESSES_EXTRA = ["aahed", "aalii", "aargh", "aarti", "abaca", "abaci
         showHandoff(
           `Round ${tp.players[1]}'s setup`,
           '🔒', 'Words locked in!',
-          `Now hand the laptop to <strong>${tp.players[0]}</strong> to enter their words.`,
+          `Now hand the device to <strong>${tp.players[0]}</strong> to enter their words.`,
           'Enter My Words →',
           () => showWordEntry(1)
         );
@@ -516,7 +518,7 @@ const VALID_GUESSES_EXTRA = ["aahed", "aalii", "aargh", "aarti", "abaca", "abaci
         showHandoff(
           'Round 1 of 3',
           '🎯', `All words set — let's play!`,
-          `Hand the laptop to <strong>${tp.players[0]}</strong> to start Round 1.`,
+          `Hand the device to <strong>${tp.players[0]}</strong> to start Round 1.`,
           'Start Round 1 →',
           () => startTurn(0, 0)
         );
@@ -569,7 +571,7 @@ const VALID_GUESSES_EXTRA = ["aahed", "aalii", "aargh", "aarti", "abaca", "abaci
         showHandoff(
           `Round ${rn} of ${TOTAL_ROUNDS}`,
           '🎯', `${tp.players[1]}'s turn`,
-          `Hand the laptop to <strong>${tp.players[1]}</strong>.<br>Press Start when they're ready.`,
+          `Hand the device to <strong>${tp.players[1]}</strong>.<br>Press Start when they're ready.`,
           'Start Puzzle',
           () => startTurn(tp.round, 1)
         );
@@ -624,7 +626,7 @@ const VALID_GUESSES_EXTRA = ["aahed", "aalii", "aargh", "aarti", "abaca", "abaci
         showHandoff(
           `Round ${nextRound+1} of ${TOTAL_ROUNDS}`,
           '🎯', `Round ${nextRound+1} — ${tp.players[0]}'s turn`,
-          `Hand the laptop to <strong>${tp.players[0]}</strong>.<br>Press Start when they're ready.`,
+          `Hand the device to <strong>${tp.players[0]}</strong>.<br>Press Start when they're ready.`,
           `Start Round ${nextRound+1}`,
           () => startTurn(nextRound, 0)
         );
@@ -778,12 +780,12 @@ const VALID_GUESSES_EXTRA = ["aahed", "aalii", "aargh", "aarti", "abaca", "abaci
       if(col>=COLS) return;
       const t=tile(row,col); t.textContent=l; t.dataset.letter=l;
       t.classList.remove('pop'); void t.offsetWidth; t.classList.add('pop');
-      guess.push(l); col++;
+      guess.push(l); col++; saveState();
     }
 
     function del(){
       if(!col) return; col--; guess.pop();
-      const t=tile(row,col); t.textContent=''; delete t.dataset.letter;
+      const t=tile(row,col); t.textContent=''; delete t.dataset.letter; saveState();
     }
 
     function submit(){
@@ -863,21 +865,82 @@ const VALID_GUESSES_EXTRA = ["aahed", "aalii", "aargh", "aarti", "abaca", "abaci
       setTimeout(()=>el.remove(),dur);
     }
 
+
+    // ── Game state persistence (sessionStorage = tab-scoped, survives reload) ──
+    const SAVE_KEY = '_tw_save';
+
+    function saveState() {
+      try {
+        const tileStates = tileEls.map(t => ({
+          text: t.textContent, letter: t.dataset.letter||'', state: t.dataset.state||''
+        }));
+        const keyStates = {};
+        Object.entries(keyEls).forEach(([k,el]) => { if (el.dataset.state) keyStates[k] = el.dataset.state; });
+        sessionStorage.setItem(SAVE_KEY, JSON.stringify({
+          screen: document.querySelector('.screen.active')?.id || 's-home',
+          mode, target, row, col, guess, over, nguesses,
+          tileStates, keyStates,
+          tp: JSON.parse(JSON.stringify(tp))
+        }));
+      } catch(e) {}
+    }
+
+    function restoreState() {
+      try {
+        const raw = sessionStorage.getItem(SAVE_KEY);
+        if (!raw) return false;
+        const s = JSON.parse(raw);
+
+        // Screens we can't meaningfully restore — fall back to home
+        const fallback = ['s-setup','s-word-entry','s-handoff'];
+        const screen = fallback.includes(s.screen) ? 's-home' : s.screen;
+
+        mode = s.mode || 'solo';
+        if (s.tp) Object.assign(tp, s.tp);
+        target = s.target || ''; row = s.row||0; col = s.col||0;
+        guess = s.guess||[]; over = s.over||false; nguesses = s.nguesses||0;
+
+        if (['s-game','s-solo-summary'].includes(screen) && s.tileStates?.length) {
+          buildBoard(); buildKeyboard();
+          s.tileStates.forEach((ts,i) => {
+            if (ts.text)   tileEls[i].textContent    = ts.text;
+            if (ts.letter) tileEls[i].dataset.letter  = ts.letter;
+            if (ts.state)  tileEls[i].dataset.state   = ts.state;
+          });
+          Object.entries(s.keyStates||{}).forEach(([k,st]) => {
+            if (keyEls[k]) keyEls[k].dataset.state = st;
+          });
+        }
+
+        if (screen === 's-game') {
+          if (mode === '2player') {
+            const rn = (tp.round||0)+1;
+            document.getElementById('game-meta').textContent =
+              `Round ${rn} of ${TOTAL_ROUNDS} · ${tp.players[tp.turn]}'s turn`;
+            document.getElementById('game-new-btn').style.display = 'none';
+          }
+          if (over) {
+            // Show continue overlay so they can proceed
+            document.getElementById('cont-overlay').classList.add('on');
+          }
+        }
+
+        if (screen === 's-round-summary') { renderScoreboard('scoreboard', tp.round+1); renderTotals(tp.round); document.getElementById('rs-next-btn').textContent = `Start Round ${tp.round+2} →`; }
+        if (screen === 's-game-over')     renderScoreboard('go-board', tp.round+1);
+
+        show(screen);
+        return true;
+      } catch(e) { sessionStorage.removeItem(SAVE_KEY); return false; }
+    }
+
     // ── Auth ────────────────────────────────────────────────────────────
     const AUTH_SALT   = '2887189806cd0b6d11cfb3dab14548c1933e1205f23456f6bafeea6b52e5dbc0';
     const AUTH_HASH   = '4f904ad3005a678ac1e97226fd02666c89a23c42bb7d5c97259eff1afb5cf1a3';
     const COOKIE_NAME = '_wpa';
-    const COOKIE_DAYS = 365;
 
-    function getCookie(name) {
-      const m = document.cookie.match('(?:^|; )' + name + '=([^;]*)');
-      return m ? decodeURIComponent(m[1]) : null;
-    }
-
-    function setCookie(name, value, days) {
-      const exp = new Date(Date.now() + days * 864e5).toUTCString();
-      document.cookie = `${name}=${encodeURIComponent(value)};expires=${exp};path=/;SameSite=Strict`;
-    }
+    function getAuth(key)       { return localStorage.getItem(key); }
+    function setAuth(key, value) { localStorage.setItem(key, value); }
+    function clearAuth(key)      { localStorage.removeItem(key); }
 
     async function sha256(str) {
       const buf  = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
@@ -893,7 +956,8 @@ const VALID_GUESSES_EXTRA = ["aahed", "aalii", "aargh", "aarti", "abaca", "abaci
     }
 
     function doLogout() {
-      document.cookie = `${COOKIE_NAME}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;SameSite=Strict`;
+      clearAuth(COOKIE_NAME);
+      sessionStorage.removeItem(SAVE_KEY);
       show('s-login');
       document.getElementById('login-input').value = '';
       document.getElementById('login-input').type  = 'password';
@@ -909,7 +973,7 @@ const VALID_GUESSES_EXTRA = ["aahed", "aalii", "aargh", "aarti", "abaca", "abaci
       btn.textContent = '...';
       const digest = await sha256(AUTH_SALT + pw);
       if (digest === AUTH_HASH) {
-        setCookie(COOKIE_NAME, AUTH_HASH, COOKIE_DAYS);
+        setAuth(COOKIE_NAME, AUTH_HASH);
         show('s-home');
       } else {
         err.textContent  = 'Incorrect password.';
@@ -919,8 +983,8 @@ const VALID_GUESSES_EXTRA = ["aahed", "aalii", "aargh", "aarti", "abaca", "abaci
     }
 
     // Boot
-    if (getCookie(COOKIE_NAME) === AUTH_HASH) {
-      show('s-home');
+    if (getAuth(COOKIE_NAME) === AUTH_HASH) {
+      if (!restoreState()) show('s-home');
     } else {
       show('s-login');
       setTimeout(()=>document.getElementById('login-input').focus(), 250);
