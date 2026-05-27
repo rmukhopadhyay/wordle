@@ -842,6 +842,7 @@ const VALID_GUESSES_EXTRA = ["aahed", "aalii", "aargh", "aarti", "abaca", "abaci
             else setTimeout(()=>showSoloSummary(false, target, nguesses), 3600);
           }
         }
+        saveState(); // save after reveal: tile colors + row state fully updated
       },(COLS-1)*DL+FD+50);
     }
 
