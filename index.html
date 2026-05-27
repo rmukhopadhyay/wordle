@@ -144,6 +144,7 @@
          color:var(--text);font-size:.85rem;font-weight:700;text-transform:uppercase;cursor:pointer;
          display:flex;align-items:center;justify-content:center;transition:background .15s;letter-spacing:.03em;}
     .key.wide{min-width:65px;font-size:.75rem;}
+    .krow:last-child .key{flex:1;min-width:0;font-size:.8rem;height:46px;}
     .key:active{filter:brightness(.8);}
     .key[data-state="correct"]{background:var(--correct);color:#fff;}
     .key[data-state="present"]{background:var(--present);color:#fff;}
@@ -214,6 +215,7 @@
       .key  { min-width: 0; flex: 1; height: 50px;
               font-size: .72rem; padding: 0 2px; letter-spacing: 0; }
       .key.wide { flex: 1.1; font-size: .6rem; }
+      .krow:last-child .key { flex: 1; height: 44px; font-size: .78rem; }
 
       /* Tighten vertical spacing so everything fits without scrolling */
       #game-main  { gap: 16px; padding-top: 12px; }
@@ -722,7 +724,8 @@ const VALID_GUESSES_EXTRA = ["aahed", "aalii", "aargh", "aarti", "abaca", "abaci
     const KEYROWS=[
       ['Q','W','E','R','T','Y','U','I','O','P'],
       ['A','S','D','F','G','H','J','K','L'],
-      ['Enter','Z','X','C','V','B','N','M','⌫']
+      ['Z','X','C','V','B','N','M'],
+      ['Enter','⌫']
     ];
     let mode='solo', target='', row=0, col=0, guess=[], over=false, revealing=false, nguesses=0;
     let tileEls=[], keyEls={};
