@@ -152,6 +152,16 @@
     /* Remote setup screen reuses setup-body + we-* styles */
     #s-remote-setup,#s-accept-challenge{min-height:100vh;}
 
+    /* Screens whose form content can grow taller than the viewport. The
+       body has overflow:hidden (to lock the game screen in place), so each
+       of these gets a bounded height + its own scroll container. `safe center`
+       keeps short forms vertically centered but pins the top to flex-start
+       when content overflows, so the header is always visible. */
+    #s-setup,#s-remote-setup,#s-accept-challenge,#s-word-entry,#s-home{
+      height:100dvh;overflow-y:auto;-webkit-overflow-scrolling:touch;
+    }
+    .setup-body,.we-body,.home-body{justify-content:safe center;}
+
     /* Game */
     #s-game{min-height:100vh;}
     #game-main{flex:1;display:flex;flex-direction:column;align-items:center;
