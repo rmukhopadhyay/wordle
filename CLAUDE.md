@@ -146,8 +146,37 @@ Turn order (initiator = P1, plays first):
 
 - **No round-summary interstitial in remote.** After a tied/continued round, the receiver lands directly on their next round; they don't see a scoreboard for the just-completed round.
 - **No "this link is stale" detection.** A receiver opening an older link silently overwrites their state.
-- **No way to re-surface the share URL after navigating home.** Phase 3's active-games list is intended to cover this.
 - **No anti-peek for secret words.** A curious opponent can `atob()` the hash and see upcoming words.
+
+## myRole (per-device perspective)
+
+Each device tags every game with a `myRole` (0 or 1) — "which player am I in this match." Stored in the on-disk wrapper (`_tw_games_v1` entry → `myRole` field) alongside `savedAt`, **not** in the encoded game itself (each device has its own perspective; the URL shouldn't carry it). Set on game creation (initiator = 0) or first URL receipt (= `turnFor` at receive time).
+
+Used by the active-games list to label `Your turn` vs `Waiting on Bob`, and by `RESUME_GAME` to pick the right screen.
+
+## Active games list
+
+Rendered on `Home` below the main buttons via the `ActiveGames` component. Shows every entry in the `games` dict that has a meaningful next step (blank/never-played solos are filtered). Each row:
+
+- **Tap** → `RESUME_GAME({gameId})` — picks the right screen by mode and state (own turn → game/accept-challenge; waiting → share; over → game-over).
+- **× button** → `DISMISS_GAME({gameId})` after a confirm prompt — manual cleanup (the 7-day TTL handles abandoned ones automatically).
+
+Status labels are computed by `describeGame(g)`:
+
+| Mode | State | Label |
+|---|---|---|
+| `s` | in-progress | "N/6 guesses" |
+| `s` | over | "Solved" / "Stumped" |
+| `l` | setup | "Setup in progress" |
+| `l` | playing | "Round N of 3" |
+| `r` | new challenge to me | "Accept the challenge" |
+| `r` | my turn | "Your turn · Round N" |
+| `r` | their turn | "Waiting on Bob" |
+| `r` | over | "Match over" |
+
+## Sharing UX
+
+`ShareScreen` feature-detects `navigator.share` (and `navigator.canShare({url, text})` when present). When available it shows a **Share →** primary button that opens the system share sheet; copy-link remains as the secondary fallback. When unavailable (most desktop browsers), only **Copy Link** is shown. Both branches stay reachable via the URL itself, which is rendered as a tappable monospaced box and copies on click too.
 
 ---
 

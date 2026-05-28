@@ -71,7 +71,7 @@
     #login-btn{width:100%;max-width:300px;}
 
     /* Home */
-    #s-home{min-height:100vh;justify-content:center;}
+    #s-home{min-height:100vh;}
     .home-body{flex:1;display:flex;flex-direction:column;align-items:center;
                justify-content:center;gap:14px;padding:40px 32px;text-align:center;width:100%;}
     .logo{font-size:3rem;font-weight:800;letter-spacing:.15em;margin-bottom:4px;}
@@ -80,6 +80,28 @@
                 letter-spacing:.06em;text-transform:uppercase;cursor:pointer;
                 text-decoration:underline;text-underline-offset:3px;margin-top:8px;}
     #logout-btn:hover{color:var(--text);}
+
+    /* Active games list */
+    .active-games{width:100%;max-width:340px;display:flex;flex-direction:column;gap:8px;
+                  margin-top:24px;}
+    .ag-label{font-size:.7rem;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);
+              text-align:center;margin-bottom:4px;}
+    .ag-row{display:flex;align-items:stretch;gap:6px;}
+    .ag-resume{flex:1;background:none;border:1px solid var(--border);border-radius:6px;
+               color:var(--text);padding:10px 12px;cursor:pointer;text-align:left;
+               display:flex;align-items:center;gap:10px;touch-action:manipulation;
+               transition:border-color .15s,background .15s;font-family:inherit;}
+    .ag-resume:hover{border-color:#565758;background:#1a1a1b;}
+    .ag-icon{font-size:1.2rem;flex-shrink:0;}
+    .ag-text{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0;}
+    .ag-title{font-size:.85rem;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .ag-status{font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;
+               overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .ag-status.mine{color:var(--correct);}
+    .ag-dismiss{background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);
+                width:36px;cursor:pointer;font-size:1.1rem;touch-action:manipulation;
+                transition:color .15s,border-color .15s;font-family:inherit;}
+    .ag-dismiss:hover{color:#e57373;border-color:#e57373;}
 
     /* Setup */
     #s-setup{min-height:100vh;}
@@ -377,6 +399,10 @@
       // Remote-only (Phase 2). Undefined for local modes.
       turnFor: undefined,
       turnCounter: undefined,
+      // Per-device, per-game identity: which player (0 or 1) I am in this
+      // match. Stored in the disk wrapper, NOT in encodeGame (since each
+      // device has its own perspective). Set on game creation/receive.
+      myRole: undefined,
       ...overrides,
     });
 
@@ -401,6 +427,7 @@
         wordEntryPhase: 1,
         turnFor: 1,        // opponent receives the share URL
         turnCounter: 1,    // first turn of the match
+        myRole: 0,         // I created this game, so I'm P1
       });
     }
 
@@ -586,17 +613,60 @@
           });
         }
 
+        case 'RESUME_GAME': {
+          // Tap a game in the active-games list. Pick the right screen for
+          // where the user left off, based on the game's current state.
+          const id = action.gameId;
+          const game = state.games[id];
+          if (!game) return state;
+          let screen = 'game';
+          if (game.over) {
+            screen = game.mode === 's' ? 'solo-summary' : 'game-over';
+          } else if (game.mode === 'r') {
+            const myRole = game.myRole;
+            if (game.challengeFor[0].length === 0 && myRole === 1) {
+              screen = 'accept-challenge';
+            } else if (game.turnFor === myRole) {
+              screen = 'game';        // my turn to play
+            } else {
+              screen = 'share';       // re-show share URL (waiting on opponent)
+            }
+          }
+          return {
+            ...state,
+            currentGameId: id,
+            screen,
+            handoff: null, pendingContinue: false, revealing: false,
+          };
+        }
+
+        case 'DISMISS_GAME': {
+          const id = action.gameId;
+          if (!state.games[id]) return state;
+          const games = { ...state.games };
+          delete games[id];
+          const currentGameId = state.currentGameId === id ? null : state.currentGameId;
+          return { ...state, games, currentGameId };
+        }
+
         case 'LOAD_FROM_URL': {
           // Phase 2 punts on divergence: incoming state always overwrites.
           // The receiver is assumed to be turnFor (the recipient of the share).
+          // For a brand-new gameId on this device, our role is whoever the
+          // URL's turnFor points at. If we already have this game (we sent
+          // and got the reply back), preserve our existing myRole.
           const incoming = action.game;
           if (!incoming || !incoming.id) return state;
-          const games = { ...state.games, [incoming.id]: incoming };
+          const existing = state.games[incoming.id];
+          const myRole = existing && existing.myRole !== undefined
+            ? existing.myRole
+            : incoming.turnFor;
+          const merged = { ...incoming, myRole };
           return {
             ...state,
-            screen: screenForReceivedGame(incoming),
+            screen: screenForReceivedGame(merged),
             currentGameId: incoming.id,
-            games,
+            games: { ...state.games, [incoming.id]: merged },
             handoff: null, pendingContinue: false, revealing: false,
           };
         }
@@ -874,6 +944,9 @@
           if (now - entry.savedAt > SAVE_TTL_MS) { changed = true; continue; }
           const game = decodeGame(entry.value);
           if (!game) { changed = true; continue; }
+          // myRole is per-device metadata stored in the wrapper, not in the
+          // encoded game (the URL doesn't carry it — each device has its own).
+          if (entry.myRole === 0 || entry.myRole === 1) game.myRole = entry.myRole;
           out[gameId] = game;
         }
         if (changed) writeGames(out);
@@ -888,7 +961,9 @@
         const now = Date.now();
         const dict = {};
         for (const [gameId, game] of Object.entries(games)) {
-          dict[gameId] = { value: encodeGame(game), savedAt: now };
+          const entry = { value: encodeGame(game), savedAt: now };
+          if (game.myRole === 0 || game.myRole === 1) entry.myRole = game.myRole;
+          dict[gameId] = entry;
         }
         if (Object.keys(dict).length === 0) {
           localStorage.removeItem(GAMES_KEY);
@@ -1065,7 +1140,7 @@
       if (!authed) return html`<${Login} onSuccess=${() => setAuthed(true)} />`;
 
       switch (state.screen) {
-        case 'home':              return html`<${Home} dispatch=${dispatch} onLogout=${onLogout} />`;
+        case 'home':              return html`<${Home} state=${state} dispatch=${dispatch} onLogout=${onLogout} />`;
         case 'setup':             return html`<${Setup} state=${state} dispatch=${dispatch} />`;
         case 'remote-setup':      return html`<${RemoteSetup} state=${state} dispatch=${dispatch} />`;
         case 'accept-challenge':  return html`<${AcceptChallenge} state=${state} dispatch=${dispatch} />`;
@@ -1076,7 +1151,7 @@
         case 'solo-summary':      return html`<${SoloSummary} state=${state} dispatch=${dispatch} />`;
         case 'round-summary':     return html`<${RoundSummary} state=${state} dispatch=${dispatch} />`;
         case 'game-over':         return html`<${GameOver} state=${state} dispatch=${dispatch} />`;
-        default:                  return html`<${Home} dispatch=${dispatch} onLogout=${onLogout} />`;
+        default:                  return html`<${Home} state=${state} dispatch=${dispatch} onLogout=${onLogout} />`;
       }
     }
 
@@ -1129,7 +1204,7 @@
       `;
     }
 
-    function Home({ dispatch, onLogout }) {
+    function Home({ state, dispatch, onLogout }) {
       return html`
         <div id="s-home" class="screen">
           <div class="home-body">
@@ -1138,8 +1213,78 @@
             <button class="btn btn-g" onClick=${() => dispatch({ type: 'PICK_REMOTE' })}>⚔ Play Remotely</button>
             <button class="btn btn-o" onClick=${() => dispatch({ type: 'PICK_TWO_PLAYER' })}>⚔ Pass & Play</button>
             <button class="btn btn-o" onClick=${() => dispatch({ type: 'PICK_SOLO' })}>Solo Play</button>
+            <${ActiveGames} state=${state} dispatch=${dispatch} />
             <button id="logout-btn" onClick=${onLogout}>Sign out</button>
           </div>
+        </div>
+      `;
+    }
+
+    // Resumeable-game descriptors. A game shows up here if there's some
+    // meaningful next-step the user can take with it.
+    function describeGame(g) {
+      const opp = g.mode === 'r' && g.players ? g.players[1 - (g.myRole ?? 0)] : null;
+      if (g.mode === 's') {
+        return {
+          icon: '🎯', title: 'Solo game',
+          status: g.over ? (g.won ? 'Solved' : 'Stumped') : `${g.guesses.length}/${ROWS} guesses`,
+          mine: !g.over,
+        };
+      }
+      if (g.mode === 'l') {
+        return {
+          icon: '⚔', title: `${g.players[0]} vs ${g.players[1]}`,
+          status: g.over ? 'Match over'
+                 : (g.challengeFor[0].length === 0 || g.challengeFor[1].length === 0) ? 'Setup in progress'
+                 : `Round ${g.round + 1} of ${TOTAL_ROUNDS}`,
+          mine: !g.over,
+        };
+      }
+      if (g.mode === 'r') {
+        const me = g.myRole ?? 0;
+        if (g.over) {
+          return { icon: '🏁', title: `vs ${opp || 'opponent'}`, status: 'Match over', mine: false };
+        }
+        if (g.challengeFor[0].length === 0 && me === 1) {
+          return { icon: '⚔', title: `Challenge from ${g.players[0]}`, status: 'Accept the challenge', mine: true };
+        }
+        if (g.turnFor === me) {
+          return { icon: '⚔', title: `vs ${opp || 'opponent'}`,
+                   status: `Your turn · Round ${g.round + 1}`, mine: true };
+        }
+        return { icon: '⚔', title: `vs ${opp || 'opponent'}`,
+                 status: `Waiting on ${opp || 'them'}`, mine: false };
+      }
+      return null;
+    }
+
+    function ActiveGames({ state, dispatch }) {
+      const list = Object.values(state.games)
+        // Hide blank/never-played solos (cleaned up on GO_HOME, but defensive).
+        .filter(g => !(g.mode === 's' && g.guesses.length === 0 && !g.over))
+        .map(g => ({ g, d: describeGame(g) }))
+        .filter(x => x.d);
+      if (list.length === 0) return null;
+      const onDismiss = (id, label) => {
+        if (confirm(`Remove "${label}" from your list?`)) {
+          dispatch({ type: 'DISMISS_GAME', gameId: id });
+        }
+      };
+      return html`
+        <div class="active-games">
+          <div class="ag-label">Active games</div>
+          ${list.map(({ g, d }) => html`
+            <div class="ag-row" key=${g.id}>
+              <button class="ag-resume" onClick=${() => dispatch({ type: 'RESUME_GAME', gameId: g.id })}>
+                <div class="ag-icon">${d.icon}</div>
+                <div class="ag-text">
+                  <div class="ag-title">${d.title}</div>
+                  <div class=${`ag-status ${d.mine ? 'mine' : ''}`}>${d.status}</div>
+                </div>
+              </button>
+              <button class="ag-dismiss" onClick=${() => onDismiss(g.id, d.title)} title="Remove">×</button>
+            </div>
+          `)}
         </div>
       `;
     }
@@ -1352,11 +1497,30 @@
         sub = `Send this to <strong>${recipient}</strong> so they can take their turn.`;
       }
 
+      const shareText = g.over
+        ? `The final result from our Twordle match`
+        : (g.turnCounter === 1 ? `I'm challenging you to Twordle!` : `Your turn in Twordle`);
+
+      // Feature-detect Web Share API. Falls back to copy when unavailable
+      // (desktop browsers without share support) or when the user cancels.
+      const canWebShare = typeof navigator !== 'undefined'
+        && typeof navigator.share === 'function'
+        && (!navigator.canShare || navigator.canShare({ url, text: shareText }));
+
       const copy = async () => {
         try { await navigator.clipboard.writeText(url); }
-        catch (e) { /* fall back below */ }
+        catch (e) { /* swallow — we'll show success indication anyway */ }
         setCopied(true);
         setTimeout(() => setCopied(false), 1800);
+      };
+
+      const share = async () => {
+        try {
+          await navigator.share({ url, text: shareText, title: 'Twordle' });
+        } catch (e) {
+          // User canceled, or the picker failed — silently fall through.
+          // No need to surface this; they can hit Copy Link instead.
+        }
       };
 
       return html`
@@ -1367,7 +1531,13 @@
             <h2>${heading}</h2>
             <p dangerouslySetInnerHTML=${{ __html: sub }}></p>
             <div class="share-url" onClick=${copy}>${url}</div>
-            <button class="btn btn-g" onClick=${copy}>${copied ? 'Copied! ✓' : 'Copy Link'}</button>
+            ${canWebShare && html`
+              <button class="btn btn-g" onClick=${share}>Share →</button>
+              <button class="btn btn-o" onClick=${copy}>${copied ? 'Copied! ✓' : 'Copy Link'}</button>
+            `}
+            ${!canWebShare && html`
+              <button class="btn btn-g" onClick=${copy}>${copied ? 'Copied! ✓' : 'Copy Link'}</button>
+            `}
             <button class="btn btn-o" onClick=${() => dispatch({ type: 'GO_HOME' })}>Done</button>
           </div>
         </div>
