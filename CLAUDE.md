@@ -49,7 +49,7 @@ Client-side password gate using the Web Crypto API. No server involved.
 - **Salt** (baked into HTML): `2887189806cd0b6d11cfb3dab14548c1933e1205f23456f6bafeea6b52e5dbc0`
 - **Expected hash** (`AUTH_HASH`): SHA-256 of `salt + password`, hex-encoded
 - **Storage**: `localStorage` key `_wpa` — shared across all tabs/windows of the same origin
-- **Session**: No expiry — persists until explicit logout or localStorage is cleared
+- **TTL**: 365 days, slid forward on each App mount via `writeAuth()`. An active user effectively never expires; an inactive user is kicked to login after a year.
 - **Auth state** lives outside the reducer (separate `useState` in `App`) so it isn't part of the saved game state
 - **Logout**: Clears both `_wpa` and `_tw_save_v2` from localStorage, dispatches `RESET`
 
@@ -124,6 +124,7 @@ Uses `localStorage` under key `_tw_save_v2`. The whole reducer state is serializ
 - Transient screens (`setup`, `word-entry`, `handoff`) fall back to `home` on rehydrate — they reference data flows that don't make sense to resume mid-step.
 - `game.revealing` and `ui.errorTick` are reset on rehydrate (they're transient UI flags that shouldn't survive reload).
 - Saved state is cleared on logout.
+- **TTL**: 7 days. The wrapper `{ value, savedAt }` is written on every save and checked on load via `readWithTTL` / `writeWithTTL`; expired saves are removed. Since every game-state mutation rewrites the wrapper, an active player never expires — the clock starts when they stop playing.
 
 Handoff `next` is stored as `{type: 'START_TURN', round, player}` (data, not a function) so the whole reducer state remains JSON-serializable.
 

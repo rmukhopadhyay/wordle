@@ -250,6 +250,46 @@
     const AUTH_HASH = '4f904ad3005a678ac1e97226fd02666c89a23c42bb7d5c97259eff1afb5cf1a3';
     const AUTH_KEY  = '_wpa';
     const SAVE_KEY  = '_tw_save_v2';
+    const DAY_MS    = 24 * 60 * 60 * 1000;
+    const SAVE_TTL_MS = 7 * DAY_MS;     // game state ages out after a week of inactivity
+    const AUTH_TTL_MS = 365 * DAY_MS;   // auth ages out after a year (refreshed on each session)
+
+    // Wrap stored values with their save timestamp; on read, discard if older
+    // than ttlMs. Returns { value } on hit, null on miss/expired/malformed.
+    // Legacy unwrapped values are accepted once and get re-saved with a
+    // wrapper on the next write.
+    function readWithTTL(key, ttlMs) {
+      try {
+        const raw = localStorage.getItem(key);
+        if (raw == null) return null;
+        let parsed = null;
+        try { parsed = JSON.parse(raw); } catch (e) { /* not JSON: legacy bare value */ }
+        if (!parsed || typeof parsed !== 'object' || typeof parsed.savedAt !== 'number') {
+          // Legacy format. Accept this once; next write will adopt the wrapper.
+          return { value: parsed ?? raw };
+        }
+        if (Date.now() - parsed.savedAt > ttlMs) {
+          localStorage.removeItem(key);
+          return null;
+        }
+        return { value: parsed.value };
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function writeWithTTL(key, value) {
+      try {
+        localStorage.setItem(key, JSON.stringify({ value, savedAt: Date.now() }));
+      } catch (e) {}
+    }
+
+    function isAuthed() {
+      const r = readWithTTL(AUTH_KEY, AUTH_TTL_MS);
+      return !!r && r.value === AUTH_HASH;
+    }
+    function writeAuth() { writeWithTTL(AUTH_KEY, AUTH_HASH); }
+    function clearAuth() { try { localStorage.removeItem(AUTH_KEY); } catch (e) {} }
 
     async function sha256(str) {
       const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
@@ -539,23 +579,17 @@
     const TRANSIENT_SCREENS = new Set(['setup', 'word-entry', 'handoff']);
 
     function loadSaved() {
-      try {
-        const raw = localStorage.getItem(SAVE_KEY);
-        if (!raw) return null;
-        const s = JSON.parse(raw);
-        if (!s || typeof s !== 'object') return null;
-        // Fall back to home for transient screens that can't restore cleanly
-        if (TRANSIENT_SCREENS.has(s.screen)) {
-          return { ...initialState };
-        }
-        // Reset transient flags on rehydrate
-        const merged = { ...initialState, ...s };
-        merged.game = { ...emptyGame(), ...(s.game || {}), revealing: false };
-        merged.ui = { errorTick: 0, errorMsg: '' };
-        return recoverEndState(merged);
-      } catch (e) {
-        return null;
-      }
+      const r = readWithTTL(SAVE_KEY, SAVE_TTL_MS);
+      if (!r) return null;
+      const s = r.value;
+      if (!s || typeof s !== 'object') return null;
+      // Fall back to home for transient screens that can't restore cleanly
+      if (TRANSIENT_SCREENS.has(s.screen)) return { ...initialState };
+      // Reset transient flags on rehydrate
+      const merged = { ...initialState, ...s };
+      merged.game = { ...emptyGame(), ...(s.game || {}), revealing: false };
+      merged.ui = { errorTick: 0, errorMsg: '' };
+      return recoverEndState(merged);
     }
 
     // If the user reloaded between SUBMIT_GUESS and REVEAL_DONE, the saved
@@ -588,13 +622,8 @@
       return { ...state, game, tp: { ...state.tp, results }, pendingContinue: true };
     }
 
-    function saveState(s) {
-      try { localStorage.setItem(SAVE_KEY, JSON.stringify(s)); } catch (e) {}
-    }
-
-    function clearSave() {
-      try { localStorage.removeItem(SAVE_KEY); } catch (e) {}
-    }
+    function saveState(s) { writeWithTTL(SAVE_KEY, s); }
+    function clearSave() { try { localStorage.removeItem(SAVE_KEY); } catch (e) {} }
 
     // ── Components ───────────────────────────────────────────────────────
 
@@ -631,15 +660,21 @@
     }
 
     function App() {
-      const [authed, setAuthed] = useState(() => localStorage.getItem(AUTH_KEY) === AUTH_HASH);
+      const [authed, setAuthed] = useState(() => isAuthed());
       const [state, dispatch] = useReducer(reducer, null, () => loadSaved() ?? initialState);
 
       useEffect(() => {
         if (authed) saveState(state);
       }, [state, authed]);
 
+      // Slide the auth TTL forward on each session so active users don't
+      // get unexpectedly logged out at the 365-day mark.
+      useEffect(() => {
+        if (authed) writeAuth();
+      }, []);
+
       const onLogout = useCallback(() => {
-        localStorage.removeItem(AUTH_KEY);
+        clearAuth();
         clearSave();
         dispatch({ type: 'RESET' });
         setAuthed(false);
@@ -674,7 +709,7 @@
         setBusy(true);
         const digest = await sha256(AUTH_SALT + pw);
         if (digest === AUTH_HASH) {
-          localStorage.setItem(AUTH_KEY, AUTH_HASH);
+          writeAuth();
           onSuccess();
         } else {
           setErr('Incorrect password.');
