@@ -91,40 +91,56 @@ Stumped players count as 6 guesses for the tiebreaker.
 
 ## State Shape
 
+The reducer state is **pointer + dict**: one `currentGameId` and a `games` map keyed by id.
+
 ```js
 {
   screen: 'home' | 'setup' | 'word-entry' | 'handoff' | 'game' | 'solo-summary' | 'round-summary' | 'game-over',
-  mode: 'solo' | '2player' | null,
-  tp: {
-    players: [p1, p2],
-    challengeFor: [[w0,w1,w2], [w0,w1,w2]],  // [guesserIdx][roundIdx]
-    results: [[r,r],[r,r],[r,r]],            // [roundIdx][playerIdx]; r = {solved, guesses} | null
-    round: 0, turn: 0, wordEntryPhase: 0,
-  },
-  game: { target, guesses[], scores[][], current, over, won, revealing },
-  handoff: { badge, icon, title, desc, btnText, next } | null,  // next is a data-driven action
-  soloSummary: { won, word, guesses } | null,
-  gameOver: { type, winnerIdx, roundsPlayed, t0?, t1? } | null,
-  roundSummary: { completedRoundIdx } | null,
-  pendingContinue: false,        // shows Continue overlay on game screen (2-player)
-  ui: { errorTick, errorMsg },   // bumped by reducer when a guess fails validation
+  currentGameId: null | string,
+  games: { [gameId]: Game },
+  // transient UI (never persisted, never encoded):
+  handoff: { badge, icon, title, desc, btnText, next } | null,
+  pendingContinue: false,
+  revealing: false,
+  ui: { errorTick, errorMsg },
+}
+
+// Game (encodable):
+{
+  id, mode,                                // mode: 's' solo · 'l' local-2p · 'r' remote
+  players: [p1, p2],
+  challengeFor: [[w0,w1,w2], [w0,w1,w2]],  // [guesserIdx][roundIdx]
+  results: [[r,r],[r,r],[r,r]],            // [roundIdx][playerIdx]
+  round, turn, wordEntryPhase,
+  target, guesses[], scores[][], current, over, won,
+  turnFor, turnCounter,                    // remote-only (Phase 2)
 }
 ```
 
-The reducer is pure-ish: `randomTarget()` calls `Math.random()` inside `PICK_SOLO`/`NEW_SOLO_GAME`, which is fine for this app.
+Components read the active game via `getCurrentGame(state)`; reducer actions mutate it via `withCurrentGame(state, update)`. Summary screens (`SoloSummary`, `GameOver`, `RoundSummary`) compute their display data from the game directly — no separate state slices.
 
 **Why validation lives in the reducer, not the Game component**: rapid keystrokes (typing the 5th letter and hitting Enter back-to-back) batch into one render cycle. A component-side validator reads `current` from a stale closure and rejects the guess. The reducer sees each dispatch's updated state, so `SUBMIT_GUESS` always validates against the latest `current`.
 
 ---
 
+## Game encoding
+
+`encodeGame(game) → base64url(JSON)` is the **shared serialization** used both for the URL hash (remote shares) and for each entry in the on-disk games dict. Short keys, single-char score codes (`'a'`/`'p'`/`'c'`). Versioned via `v: 1`.
+
+---
+
 ## Game State Persistence
 
-Uses `localStorage` under key `_tw_save_v2`. The whole reducer state is serialized on every change via `useEffect([state])`.
+Two `localStorage` keys:
 
-- Transient screens (`setup`, `word-entry`, `handoff`) fall back to `home` on rehydrate — they reference data flows that don't make sense to resume mid-step.
-- `game.revealing` and `ui.errorTick` are reset on rehydrate (they're transient UI flags that shouldn't survive reload).
-- Saved state is cleared on logout.
-- **TTL**: 7 days. The wrapper `{ value, savedAt }` is written on every save and checked on load via `readWithTTL` / `writeWithTTL`; expired saves are removed. Since every game-state mutation rewrites the wrapper, an active player never expires — the clock starts when they stop playing.
+- `_tw_games_v1`: `{ [gameId]: { value: <encoded>, savedAt } }` — the games dict. Each entry has its own TTL (7 days), so games age out independently.
+- `_tw_meta_v1`: `{ currentGameId, screen }` — the "where am I" pointer (also TTL-wrapped).
+
+State is saved on every reducer change via one `useEffect([state])` that calls `saveState(state)` → `writeGames` + `writeMeta`. Transient screens (`setup`, `word-entry`, `handoff`) fall back to `home` on rehydrate. `revealing` and `ui.errorTick` reset. Saved state is cleared on logout.
+
+A finished game (`solo-summary` / `game-over`) is dropped from the dict when the user leaves it via Menu / Play Again / Change Mode — no UI path leads back into a finished game anyway. Blank solo games (started but never guessed) are also dropped on `GO_HOME`. Other in-progress games stay in the dict and will surface in the active-games list once Phase 2 ships.
+
+Legacy `_tw_save_v2` is migrated once on first boot of this version: its single state is decoded, converted into a new game entry, and the old key is removed.
 
 Handoff `next` is stored as `{type: 'START_TURN', round, player}` (data, not a function) so the whole reducer state remains JSON-serializable.
 

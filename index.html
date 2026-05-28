@@ -249,7 +249,9 @@
     const AUTH_SALT = '2887189806cd0b6d11cfb3dab14548c1933e1205f23456f6bafeea6b52e5dbc0';
     const AUTH_HASH = '4f904ad3005a678ac1e97226fd02666c89a23c42bb7d5c97259eff1afb5cf1a3';
     const AUTH_KEY  = '_wpa';
-    const SAVE_KEY  = '_tw_save_v2';
+    const GAMES_KEY = '_tw_games_v1';   // dict of { gameId: { value: <encoded>, savedAt } }
+    const META_KEY  = '_tw_meta_v1';    // { currentGameId, screen } — the "where am I" pointer
+    const LEGACY_SAVE_KEY = '_tw_save_v2';  // migrated once into GAMES_KEY on first boot of this version
     const DAY_MS    = 24 * 60 * 60 * 1000;
     const SAVE_TTL_MS = 7 * DAY_MS;     // game state ages out after a week of inactivity
     const AUTH_TTL_MS = 365 * DAY_MS;   // auth ages out after a year (refreshed on each session)
@@ -326,36 +328,141 @@
       return ANSWERS[Math.floor(Math.random() * ANSWERS.length)].toUpperCase();
     }
 
-    // ── Reducer ───────────────────────────────────────────────────────────
-    const emptyGame = () => ({
+    // ── Game model ────────────────────────────────────────────────────────
+    // A *game* is the per-game domain state — the thing that gets encoded into
+    // a URL hash for remote play AND stored as an entry in the on-disk games
+    // dict. UI/transient state (current screen, handoff config, reveal flag)
+    // lives OUTSIDE the game on the reducer state, so it doesn't get
+    // serialized into share links or saved across reloads.
+    //
+    // mode: 's' solo · 'l' local 2-player · 'r' remote (Phase 2+)
+    // The shape is the same across modes; unused slices stay at defaults.
+
+    const GAME_VERSION = 1;
+
+    function randomGameId() {
+      // 6 base32 chars (~30 bits — collision-free for a personal app).
+      // Alphabet skips lookalikes (0/o/O/1/l/I) for QR/typed contexts.
+      const ALPHA = 'abcdefghijkmnpqrstuvwxyz23456789';
+      const buf = new Uint8Array(6);
+      crypto.getRandomValues(buf);
+      let out = '';
+      for (let i = 0; i < 6; i++) out += ALPHA[buf[i] & 31];
+      return out;
+    }
+
+    const emptyGame = (overrides = {}) => ({
+      id: '',
+      mode: 's',
+      players: ['', ''],
+      challengeFor: [[], []],
+      results: Array.from({length: TOTAL_ROUNDS}, () => [null, null]),
+      round: 0,
+      turn: 0,
+      wordEntryPhase: 0,
       target: '',
       guesses: [],
       scores: [],
       current: '',
       over: false,
       won: false,
-      revealing: false,
+      // Remote-only (Phase 2). Undefined for local modes.
+      turnFor: undefined,
+      turnCounter: undefined,
+      ...overrides,
     });
 
-    const emptyTP = () => ({
-      players: ['',''],
-      challengeFor: [[],[]],
-      results: Array.from({length: TOTAL_ROUNDS}, () => [null,null]),
-      round: 0,
-      turn: 0,
-      wordEntryPhase: 0,
-    });
+    function newSoloGame() {
+      return emptyGame({ id: randomGameId(), mode: 's', target: randomTarget() });
+    }
+
+    function newLocalGame(p1, p2) {
+      return emptyGame({ id: randomGameId(), mode: 'l', players: [p1, p2] });
+    }
+
+    function getCurrentGame(state) {
+      return state.currentGameId ? state.games[state.currentGameId] : null;
+    }
+
+    // Update the current game via a partial object or an updater function.
+    function withCurrentGame(state, update) {
+      const id = state.currentGameId;
+      if (!id) return state;
+      const game = state.games[id];
+      if (!game) return state;
+      const next = typeof update === 'function' ? update(game) : { ...game, ...update };
+      return { ...state, games: { ...state.games, [id]: next } };
+    }
+
+    // ── Game encoding (shared between URL hash and on-disk dict) ──────────
+    // Compact JSON with short keys; scores as single chars ('a'/'p'/'c').
+    // base64url-wrapped at the boundary.
+    function encodeGame(g) {
+      const packed = {
+        v: GAME_VERSION,
+        id: g.id, m: g.mode,
+        p: g.players,
+        cf: g.challengeFor,
+        rs: g.results,
+        r: g.round, t: g.turn, wep: g.wordEntryPhase,
+        tg: g.target,
+        gs: g.guesses,
+        sc: g.scores.map(row => row.map(s => s[0])),
+        cu: g.current,
+        ov: g.over, wn: g.won,
+      };
+      if (g.mode === 'r') { packed.for = g.turnFor; packed.tc = g.turnCounter; }
+      return b64UrlEncode(JSON.stringify(packed));
+    }
+
+    function decodeGame(str) {
+      try {
+        const p = JSON.parse(b64UrlDecode(str));
+        if (!p || p.v !== GAME_VERSION) return null;
+        const SCORE = { a: 'absent', p: 'present', c: 'correct' };
+        return emptyGame({
+          id: p.id, mode: p.m,
+          players: p.p || ['', ''],
+          challengeFor: p.cf || [[], []],
+          results: p.rs || Array.from({length: TOTAL_ROUNDS}, () => [null, null]),
+          round: p.r ?? 0, turn: p.t ?? 0, wordEntryPhase: p.wep ?? 0,
+          target: p.tg || '',
+          guesses: p.gs || [],
+          scores: (p.sc || []).map(row => row.map(c => SCORE[c] || 'absent')),
+          current: p.cu || '',
+          over: !!p.ov, won: !!p.wn,
+          turnFor: p.for, turnCounter: p.tc,
+        });
+      } catch (e) { return null; }
+    }
+
+    function b64UrlEncode(str) {
+      const bytes = new TextEncoder().encode(str);
+      let bin = '';
+      for (const b of bytes) bin += String.fromCharCode(b);
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    function b64UrlDecode(str) {
+      let s = str.replace(/-/g, '+').replace(/_/g, '/');
+      const pad = s.length % 4;
+      if (pad) s += '='.repeat(4 - pad);
+      const bin = atob(s);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new TextDecoder().decode(bytes);
+    }
+
+    // ── Reducer ───────────────────────────────────────────────────────────
 
     const initialState = {
       screen: 'home',
-      mode: null,           // 'solo' | '2player' | null
-      tp: emptyTP(),
-      game: emptyGame(),
-      handoff: null,        // { badge, icon, title, desc, btnText, next }
-      soloSummary: null,    // { won, word, guesses }
-      gameOver: null,       // { type, winnerIdx, roundsPlayed, t0, t1 }
-      roundSummary: null,   // { completedRoundIdx }
+      currentGameId: null,         // pointer into `games`
+      games: {},                    // { [gameId]: game }
+      // Transient UI state — NOT encoded, NOT persisted across reload
+      handoff: null,
       pendingContinue: false,
+      revealing: false,
       ui: { errorTick: 0, errorMsg: '' },
     };
 
@@ -364,100 +471,122 @@
         case 'RESET':
           return { ...initialState };
 
-        case 'PICK_SOLO':
-          return { ...initialState, screen: 'game', mode: 'solo',
-                   game: { ...emptyGame(), target: randomTarget() } };
+        case 'PICK_SOLO': {
+          const game = newSoloGame();
+          return { ...state, screen: 'game', currentGameId: game.id,
+                   games: { ...state.games, [game.id]: game },
+                   handoff: null, pendingContinue: false, revealing: false };
+        }
 
-        case 'NEW_SOLO_GAME':
-          return { ...state, screen: 'game', mode: 'solo',
-                   soloSummary: null, pendingContinue: false,
-                   game: { ...emptyGame(), target: randomTarget() } };
+        case 'NEW_SOLO_GAME': {
+          // Replace the current solo game with a fresh one — drop the prior id
+          // so finished/abandoned solos don't accumulate in the dict.
+          const game = newSoloGame();
+          const games = { ...state.games };
+          if (state.currentGameId) delete games[state.currentGameId];
+          return { ...state, screen: 'game', currentGameId: game.id,
+                   games: { ...games, [game.id]: game },
+                   handoff: null, pendingContinue: false, revealing: false };
+        }
 
         case 'PICK_TWO_PLAYER':
           return { ...state, screen: 'setup' };
 
-        case 'GO_HOME':
-          return { ...initialState };
+        case 'GO_HOME': {
+          // Keep the games dict (so non-current games survive), but drop the
+          // pointer + all transient UI. The current game is also dropped if
+          // there's nothing meaningful to resume:
+          //   - blank solo (started but never guessed)
+          //   - finished game (we're on solo-summary or game-over)
+          //     — no UI path leads back into a finished game anyway.
+          const games = { ...state.games };
+          const cur = getCurrentGame(state);
+          if (cur) {
+            const finished = state.screen === 'solo-summary' || state.screen === 'game-over';
+            const blankSolo = cur.mode === 's' && cur.guesses.length === 0 && !cur.over;
+            if (finished || blankSolo) delete games[cur.id];
+          }
+          return { ...initialState, games };
+        }
 
         case 'SETUP_DONE': {
-          const tp = { ...emptyTP(), players: [action.p1, action.p2], wordEntryPhase: 0 };
-          return { ...state, mode: '2player', tp, screen: 'word-entry' };
+          const game = newLocalGame(action.p1, action.p2);
+          return { ...state, screen: 'word-entry', currentGameId: game.id,
+                   games: { ...state.games, [game.id]: game },
+                   handoff: null, pendingContinue: false, revealing: false };
         }
 
         case 'WORD_ENTRY_DONE': {
-          // phase 0: P2 set words for P0 (guesserIdx=0)
-          // phase 1: P1 set words for P1 (guesserIdx=1)
-          const phase = state.tp.wordEntryPhase;
+          const g = getCurrentGame(state);
+          if (!g) return state;
+          // phase 0: P2 (setterIdx=1) sets words for P1 (guesserIdx=0)
+          // phase 1: P1 (setterIdx=0) sets words for P2 (guesserIdx=1)
+          const phase = g.wordEntryPhase;
           const guesserIdx = phase === 0 ? 0 : 1;
-          const challengeFor = state.tp.challengeFor.map(arr => arr.slice());
+          const challengeFor = g.challengeFor.map(arr => arr.slice());
           challengeFor[guesserIdx] = action.words;
-          const tp = { ...state.tp, challengeFor };
           if (phase === 0) {
-            return {
-              ...state,
-              tp: { ...tp, wordEntryPhase: 1 },
-              screen: 'handoff',
+            return withCurrentGame({
+              ...state, screen: 'handoff',
               handoff: {
-                badge: `${tp.players[0]}'s setup`,
+                badge: `${g.players[0]}'s setup`,
                 icon: '🔒',
                 title: 'Words locked in!',
-                desc: `Now hand the device to <strong>${tp.players[0]}</strong> to enter their words.`,
+                desc: `Now hand the device to <strong>${g.players[0]}</strong> to enter their words.`,
                 btnText: 'Enter My Words →',
                 next: { type: 'GO_WORD_ENTRY' },
               },
-            };
-          } else {
-            return {
-              ...state, tp,
-              screen: 'handoff',
-              handoff: {
-                badge: 'Round 1 of 3',
-                icon: '🎯',
-                title: "All words set — let's play!",
-                desc: `Hand the device to <strong>${tp.players[0]}</strong> to start Round 1.`,
-                btnText: 'Start Round 1 →',
-                next: { type: 'START_TURN', round: 0, player: 0 },
-              },
-            };
+            }, { challengeFor, wordEntryPhase: 1 });
           }
+          return withCurrentGame({
+            ...state, screen: 'handoff',
+            handoff: {
+              badge: 'Round 1 of 3',
+              icon: '🎯',
+              title: "All words set — let's play!",
+              desc: `Hand the device to <strong>${g.players[0]}</strong> to start Round 1.`,
+              btnText: 'Start Round 1 →',
+              next: { type: 'START_TURN', round: 0, player: 0 },
+            },
+          }, { challengeFor });
         }
 
         case 'GO_WORD_ENTRY':
           return { ...state, screen: 'word-entry', handoff: null };
 
         case 'START_TURN': {
-          const target = state.tp.challengeFor[action.player][action.round];
-          const tp = { ...state.tp, round: action.round, turn: action.player };
-          return {
-            ...state,
-            tp,
-            screen: 'game',
-            handoff: null,
-            roundSummary: null,
-            pendingContinue: false,
-            game: { ...emptyGame(), target },
-          };
+          const g = getCurrentGame(state);
+          if (!g) return state;
+          const target = g.challengeFor[action.player][action.round];
+          return withCurrentGame({
+            ...state, screen: 'game',
+            handoff: null, pendingContinue: false, revealing: false,
+          }, {
+            round: action.round, turn: action.player,
+            target, guesses: [], scores: [], current: '',
+            over: false, won: false,
+          });
         }
 
         case 'TYPE_LETTER': {
-          const g = state.game;
-          if (g.over || g.revealing) return state;
+          const g = getCurrentGame(state);
+          if (!g || g.over || state.revealing) return state;
           if (g.current.length >= COLS) return state;
-          return { ...state, game: { ...g, current: g.current + action.letter } };
+          return withCurrentGame(state, { current: g.current + action.letter });
         }
 
         case 'DELETE_LETTER': {
-          const g = state.game;
-          if (g.over || g.revealing) return state;
+          const g = getCurrentGame(state);
+          if (!g || g.over || state.revealing) return state;
           if (!g.current) return state;
-          return { ...state, game: { ...g, current: g.current.slice(0, -1) } };
+          return withCurrentGame(state, { current: g.current.slice(0, -1) });
         }
 
         case 'SUBMIT_GUESS': {
           // Reducer validates and scores so we never lose the latest `current`
           // to a stale component closure (rapid key events batch before re-render).
-          const g = state.game;
-          if (g.over || g.revealing) return state;
+          const g = getCurrentGame(state);
+          if (!g || g.over || state.revealing) return state;
           if (g.current.length < COLS) {
             return { ...state, ui: { errorTick: state.ui.errorTick + 1, errorMsg: 'Not enough letters' } };
           }
@@ -465,76 +594,66 @@
             return { ...state, ui: { errorTick: state.ui.errorTick + 1, errorMsg: 'Not in word list' } };
           }
           const score = scoreGuess(g.current, g.target);
-          return {
-            ...state,
-            game: {
-              ...g,
-              guesses: [...g.guesses, g.current],
-              scores: [...g.scores, score],
-              current: '',
-              revealing: true,
-            },
-          };
+          return withCurrentGame({ ...state, revealing: true }, {
+            guesses: [...g.guesses, g.current],
+            scores: [...g.scores, score],
+            current: '',
+          });
         }
 
         case 'REVEAL_DONE': {
-          // Called by the Game component after the reveal animation (plus any
-          // win/lose toast delay) completes. Determines game end.
-          const g = state.game;
+          // Called by Game after the reveal animation (+ any win/lose toast
+          // delay) completes. Decides game-end and where to navigate next.
+          const g = getCurrentGame(state);
+          if (!g) return state;
           const lastScore = g.scores[g.scores.length - 1];
           const won = !!lastScore && lastScore.every(s => s === 'correct');
           const lost = !won && g.guesses.length >= ROWS;
           const ended = won || lost;
-          const game = { ...g, revealing: false, over: ended, won };
-          if (!ended) return { ...state, game };
-          if (state.mode === 'solo') {
-            return {
-              ...state, game,
-              screen: 'solo-summary',
-              soloSummary: { won, word: g.target, guesses: g.guesses.length },
-            };
+          if (!ended) return { ...state, revealing: false };
+          if (g.mode === 's') {
+            return withCurrentGame({ ...state, revealing: false, screen: 'solo-summary' },
+                                   { over: true, won });
           }
-          const results = state.tp.results.map(r => r.slice());
-          results[state.tp.round][state.tp.turn] = { solved: won, guesses: g.guesses.length };
-          return { ...state, game, tp: { ...state.tp, results }, pendingContinue: true };
+          // 2-player: record the round result + show continue overlay
+          const results = g.results.map(r => r.slice());
+          results[g.round][g.turn] = { solved: won, guesses: g.guesses.length };
+          return withCurrentGame({ ...state, revealing: false, pendingContinue: true },
+                                 { over: true, won, results });
         }
 
         case 'CONTINUE_FROM_TURN': {
-          // 2-player: turn 0 ended → handoff for turn 1; turn 1 ended → evaluate round
-          const { round, turn, players } = state.tp;
-          if (turn === 0) {
-            const rn = round + 1;
+          // 2-player: turn 0 → handoff for turn 1; turn 1 → evaluate round
+          const g = getCurrentGame(state);
+          if (!g) return state;
+          if (g.turn === 0) {
+            const rn = g.round + 1;
             return {
-              ...state,
-              pendingContinue: false,
-              screen: 'handoff',
+              ...state, pendingContinue: false, screen: 'handoff',
               handoff: {
                 badge: `Round ${rn} of ${TOTAL_ROUNDS}`,
                 icon: '🎯',
-                title: `${players[1]}'s turn`,
-                desc: `Hand the device to <strong>${players[1]}</strong>.<br>Press Start when they're ready.`,
+                title: `${g.players[1]}'s turn`,
+                desc: `Hand the device to <strong>${g.players[1]}</strong>.<br>Press Start when they're ready.`,
                 btnText: 'Start Puzzle',
-                next: { type: 'START_TURN', round, player: 1 },
+                next: { type: 'START_TURN', round: g.round, player: 1 },
               },
             };
           }
-          // turn === 1 → evaluate round
-          return evalRound({ ...state, pendingContinue: false }, round);
+          return evalRound({ ...state, pendingContinue: false }, g.round);
         }
 
         case 'NEXT_ROUND_HANDOFF': {
-          // From round summary, start next round
-          const { players } = state.tp;
+          const g = getCurrentGame(state);
+          if (!g) return state;
           const nextRound = action.nextRound;
           return {
-            ...state,
-            screen: 'handoff',
-            roundSummary: null,
+            ...state, screen: 'handoff',
             handoff: {
               badge: `Round ${nextRound + 1} of ${TOTAL_ROUNDS}`,
               icon: '🎯',
-              title: `Round ${nextRound + 1} — ${players[0]}'s turn`,
-              desc: `Hand the device to <strong>${players[0]}</strong>.<br>Press Start when they're ready.`,
+              title: `Round ${nextRound + 1} — ${g.players[0]}'s turn`,
+              desc: `Hand the device to <strong>${g.players[0]}</strong>.<br>Press Start when they're ready.`,
               btnText: `Start Round ${nextRound + 1}`,
               next: { type: 'START_TURN', round: nextRound, player: 0 },
             },
@@ -547,91 +666,185 @@
     }
 
     function evalRound(state, roundIdx) {
-      const r0 = state.tp.results[roundIdx][0];
-      const r1 = state.tp.results[roundIdx][1];
-      const roundsPlayed = roundIdx + 1;
+      const g = getCurrentGame(state);
+      if (!g) return state;
+      const r0 = g.results[roundIdx][0];
+      const r1 = g.results[roundIdx][1];
+      // Asymmetric stumping → instant game over; otherwise last round → totals
+      // game over; otherwise → round summary. The display type is computed
+      // from the game data in the GameOver component (no separate state slice).
+      if (r0.solved !== r1.solved) return { ...state, screen: 'game-over' };
+      if (roundIdx === TOTAL_ROUNDS - 1) return { ...state, screen: 'game-over' };
+      return { ...state, screen: 'round-summary' };
+    }
 
-      // Asymmetric stumping → instant win
-      if (r0.solved !== r1.solved) {
-        const winnerIdx = r0.solved ? 0 : 1;
-        return { ...state, screen: 'game-over',
-                 gameOver: { type: 'stump', winnerIdx, roundsPlayed } };
+    // Display helpers — derived view from the current game.
+    function gameOverDetails(g) {
+      const roundsPlayed = g.round + 1;
+      const last = g.results[g.round];
+      if (last[0].solved !== last[1].solved) {
+        return { type: 'stump', winnerIdx: last[0].solved ? 0 : 1, roundsPlayed };
       }
-
-      // Last round → compare totals
-      if (roundIdx === TOTAL_ROUNDS - 1) {
-        const t0 = state.tp.results.reduce((s, r) => s + r[0].guesses, 0);
-        const t1 = state.tp.results.reduce((s, r) => s + r[1].guesses, 0);
-        if (t0 < t1) return { ...state, screen: 'game-over',
-                              gameOver: { type: 'guesses', winnerIdx: 0, roundsPlayed, t0, t1 } };
-        if (t1 < t0) return { ...state, screen: 'game-over',
-                              gameOver: { type: 'guesses', winnerIdx: 1, roundsPlayed, t0, t1 } };
-        return { ...state, screen: 'game-over',
-                 gameOver: { type: 'tie', winnerIdx: -1, roundsPlayed, t0, t1 } };
-      }
-
-      // Tie this round — go to round summary
-      return { ...state, screen: 'round-summary',
-               roundSummary: { completedRoundIdx: roundIdx } };
+      const t0 = g.results.reduce((s, r) => s + r[0].guesses, 0);
+      const t1 = g.results.reduce((s, r) => s + r[1].guesses, 0);
+      if (t0 < t1) return { type: 'guesses', winnerIdx: 0, roundsPlayed, t0, t1 };
+      if (t1 < t0) return { type: 'guesses', winnerIdx: 1, roundsPlayed, t0, t1 };
+      return { type: 'tie', winnerIdx: -1, roundsPlayed, t0, t1 };
     }
 
     // ── Persistence ──────────────────────────────────────────────────────
+    // Two storage keys:
+    //   GAMES_KEY: { [gameId]: { value: <encoded>, savedAt } } — the games
+    //   META_KEY:  { value: { currentGameId, screen }, savedAt } — the pointer
+    // Each game ages out independently via SAVE_TTL_MS; the meta entry uses
+    // the same TTL so a stale pointer to an expired game doesn't linger.
+
     const TRANSIENT_SCREENS = new Set(['setup', 'word-entry', 'handoff']);
 
-    function loadSaved() {
-      const r = readWithTTL(SAVE_KEY, SAVE_TTL_MS);
-      if (!r) return null;
-      const s = r.value;
-      if (!s || typeof s !== 'object') return null;
-      // Fall back to home for transient screens that can't restore cleanly
-      if (TRANSIENT_SCREENS.has(s.screen)) return { ...initialState };
-      // Reset transient flags on rehydrate
-      const merged = { ...initialState, ...s };
-      merged.game = { ...emptyGame(), ...(s.game || {}), revealing: false };
-      merged.ui = { errorTick: 0, errorMsg: '' };
-      return recoverEndState(merged);
+    function loadGames() {
+      try {
+        const raw = localStorage.getItem(GAMES_KEY);
+        if (!raw) return {};
+        const dict = JSON.parse(raw);
+        if (!dict || typeof dict !== 'object') return {};
+        const out = {};
+        let changed = false;
+        const now = Date.now();
+        for (const [gameId, entry] of Object.entries(dict)) {
+          if (!entry || typeof entry !== 'object' || typeof entry.savedAt !== 'number') {
+            changed = true; continue;
+          }
+          if (now - entry.savedAt > SAVE_TTL_MS) { changed = true; continue; }
+          const game = decodeGame(entry.value);
+          if (!game) { changed = true; continue; }
+          out[gameId] = game;
+        }
+        if (changed) writeGames(out);
+        return out;
+      } catch (e) {
+        return {};
+      }
+    }
+
+    function writeGames(games) {
+      try {
+        const now = Date.now();
+        const dict = {};
+        for (const [gameId, game] of Object.entries(games)) {
+          dict[gameId] = { value: encodeGame(game), savedAt: now };
+        }
+        if (Object.keys(dict).length === 0) {
+          localStorage.removeItem(GAMES_KEY);
+        } else {
+          localStorage.setItem(GAMES_KEY, JSON.stringify(dict));
+        }
+      } catch (e) {}
+    }
+
+    function loadMeta() {
+      const r = readWithTTL(META_KEY, SAVE_TTL_MS);
+      return r ? r.value : null;
+    }
+
+    function writeMeta(meta) { writeWithTTL(META_KEY, meta); }
+    function clearMeta() { try { localStorage.removeItem(META_KEY); } catch (e) {} }
+    function clearSaves() {
+      try {
+        localStorage.removeItem(GAMES_KEY);
+        localStorage.removeItem(META_KEY);
+        localStorage.removeItem(LEGACY_SAVE_KEY);
+      } catch (e) {}
+    }
+
+    // One-time migration: collapse the old single-state _tw_save_v2 into a
+    // single entry in the new games dict.
+    function migrateLegacy() {
+      try {
+        const raw = localStorage.getItem(LEGACY_SAVE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        const old = (parsed && typeof parsed === 'object' && 'value' in parsed && 'savedAt' in parsed)
+          ? parsed.value : parsed;
+        localStorage.removeItem(LEGACY_SAVE_KEY);
+        if (!old || !old.mode) return;
+        const game = emptyGame({
+          id: randomGameId(),
+          mode: old.mode === 'solo' ? 's' : 'l',
+          players: old.tp?.players || ['', ''],
+          challengeFor: old.tp?.challengeFor || [[], []],
+          results: old.tp?.results || Array.from({length: TOTAL_ROUNDS}, () => [null, null]),
+          round: old.tp?.round ?? 0,
+          turn: old.tp?.turn ?? 0,
+          wordEntryPhase: old.tp?.wordEntryPhase ?? 0,
+          target: old.game?.target || '',
+          guesses: old.game?.guesses || [],
+          scores: old.game?.scores || [],
+          current: old.game?.current || '',
+          over: !!old.game?.over, won: !!old.game?.won,
+        });
+        const games = loadGames();
+        games[game.id] = game;
+        writeGames(games);
+        const screen = TRANSIENT_SCREENS.has(old.screen) ? 'home' : (old.screen || 'home');
+        if (screen !== 'home') {
+          writeMeta({ currentGameId: game.id, screen });
+        }
+      } catch (e) {
+        try { localStorage.removeItem(LEGACY_SAVE_KEY); } catch (e2) {}
+      }
+    }
+
+    function loadInitialState() {
+      migrateLegacy();
+      const games = loadGames();
+      const meta = loadMeta();
+      let currentGameId = null;
+      let screen = 'home';
+      if (meta && meta.currentGameId && games[meta.currentGameId]) {
+        currentGameId = meta.currentGameId;
+        screen = TRANSIENT_SCREENS.has(meta.screen) ? 'home' : (meta.screen || 'home');
+      }
+      return recoverEndState({ ...initialState, games, currentGameId, screen });
     }
 
     // If the user reloaded between SUBMIT_GUESS and REVEAL_DONE, the saved
-    // state has the final guess committed (and scored) but `over` is still
-    // false and `pendingContinue` / `soloSummary` aren't set yet — the
-    // animation never finished so REVEAL_DONE never fired. On rehydrate we'd
-    // be stuck on the game screen with no way to advance. Detect that case
-    // and synthesize the same transition REVEAL_DONE would have made.
+    // game has the final guess committed but `over` is false — REVEAL_DONE
+    // never fired so we'd be stuck on the game screen with no continue.
+    // Synthesize the same transition REVEAL_DONE would have made.
     function recoverEndState(state) {
       if (state.screen !== 'game') return state;
-      const g = state.game;
-      if (g.over || g.guesses.length === 0) return state;
+      const g = getCurrentGame(state);
+      if (!g || g.over || g.guesses.length === 0) return state;
       const lastScore = g.scores[g.scores.length - 1];
       const won = !!lastScore && lastScore.every(s => s === 'correct');
       const lost = !won && g.guesses.length >= ROWS;
       if (!won && !lost) return state;
-      const game = { ...g, over: true, won };
-      if (state.mode === 'solo') {
-        return {
-          ...state, game,
-          screen: 'solo-summary',
-          soloSummary: { won, word: g.target, guesses: g.guesses.length },
-        };
+      const updates = { over: true, won };
+      if (g.mode === 's') {
+        return withCurrentGame({ ...state, screen: 'solo-summary' }, updates);
       }
-      // 2-player: write the result if it isn't already, show continue overlay
-      const results = state.tp.results.map(r => r.slice());
-      if (!results[state.tp.round][state.tp.turn]) {
-        results[state.tp.round][state.tp.turn] = { solved: won, guesses: g.guesses.length };
+      const results = g.results.map(r => r.slice());
+      if (!results[g.round][g.turn]) {
+        results[g.round][g.turn] = { solved: won, guesses: g.guesses.length };
       }
-      return { ...state, game, tp: { ...state.tp, results }, pendingContinue: true };
+      updates.results = results;
+      return withCurrentGame({ ...state, pendingContinue: true }, updates);
     }
 
-    function saveState(s) { writeWithTTL(SAVE_KEY, s); }
-    function clearSave() { try { localStorage.removeItem(SAVE_KEY); } catch (e) {} }
+    function saveState(s) {
+      writeGames(s.games);
+      writeMeta({ currentGameId: s.currentGameId, screen: s.screen });
+    }
 
     // ── Components ───────────────────────────────────────────────────────
 
     // True iff a 2-player match is mid-flight (past setup, before game-over).
     // Used to decide whether the menu button should confirm before going home.
     function isInProgressMatch(state) {
-      return state.mode === '2player'
-        && state.tp.players[0] !== ''
+      const g = getCurrentGame(state);
+      return !!g
+        && (g.mode === 'l' || g.mode === 'r')
+        && g.players[0] !== ''
         && state.screen !== 'game-over';
     }
 
@@ -661,7 +874,7 @@
 
     function App() {
       const [authed, setAuthed] = useState(() => isAuthed());
-      const [state, dispatch] = useReducer(reducer, null, () => loadSaved() ?? initialState);
+      const [state, dispatch] = useReducer(reducer, null, loadInitialState);
 
       useEffect(() => {
         if (authed) saveState(state);
@@ -675,7 +888,7 @@
 
       const onLogout = useCallback(() => {
         clearAuth();
-        clearSave();
+        clearSaves();
         dispatch({ type: 'RESET' });
         setAuthed(false);
       }, []);
@@ -794,11 +1007,12 @@
     }
 
     function WordEntry({ state, dispatch }) {
-      const phase = state.tp.wordEntryPhase;
+      const g = getCurrentGame(state);
+      const phase = g?.wordEntryPhase ?? 0;
       const setterIdx  = phase === 0 ? 1 : 0;
       const guesserIdx = phase === 0 ? 0 : 1;
-      const setter  = state.tp.players[setterIdx];
-      const guesser = state.tp.players[guesserIdx];
+      const setter  = g?.players[setterIdx] ?? '';
+      const guesser = g?.players[guesserIdx] ?? '';
 
       const [words, setWords] = useState(['', '', '']);
       const [reveal, setReveal] = useState([false, false, false]);
@@ -892,8 +1106,12 @@
     }
 
     function Game({ state, dispatch }) {
-      const { game, mode, tp, pendingContinue, ui } = state;
-      const { guesses, scores, current, target, over, revealing } = game;
+      const { pendingContinue, ui, revealing } = state;
+      const game = getCurrentGame(state) ?? emptyGame();
+      const { guesses, scores, current, target, over, players } = game;
+      const mode = game.mode;
+      // Local aliases that preserve readability of the surrounding code:
+      const tp = { players, round: game.round, turn: game.turn, results: game.results };
 
       // Reveal animation: when a new guess is committed, animate the new row.
       // `revealing` (in reducer state) blocks input. Per-tile colors appear
@@ -931,16 +1149,16 @@
             const lastIdx = guesses.length - 1;
             const soloMsgs = ['Warmed up already!','Limber!','Nicely warm!','Hit your stride!','Long warmup!','Phew!'];
             const duelMsgs = ['Genius!','Magnificent!','Impressive!','Splendid!','Great!','Phew!'];
-            const msgs = mode === 'solo' ? soloMsgs : duelMsgs;
+            const msgs = mode === 's' ? soloMsgs : duelMsgs;
             timers.push(setTimeout(() => toast(msgs[Math.min(lastIdx, msgs.length - 1)], 2200), 400));
-            if (mode === 'solo') {
+            if (mode === 's') {
               timers.push(setTimeout(() => dispatch({ type: 'REVEAL_DONE' }), 2400));
             } else {
               dispatch({ type: 'REVEAL_DONE' });
             }
           } else if (lost) {
             timers.push(setTimeout(() => toast(target, 3500), 200));
-            if (mode === 'solo') {
+            if (mode === 's') {
               timers.push(setTimeout(() => dispatch({ type: 'REVEAL_DONE' }), 3600));
             } else {
               dispatch({ type: 'REVEAL_DONE' });
@@ -962,7 +1180,7 @@
 
       // Continue overlay (2-player): fades in 1.8s after game-over
       useEffect(() => {
-        if (mode !== '2player' || !pendingContinue) {
+        if (mode === 's' || !pendingContinue) {
           setShowContinueBtn(false);
           if (continueTimerRef.current) { clearTimeout(continueTimerRef.current); continueTimerRef.current = null; }
           return;
@@ -1031,7 +1249,7 @@
         setTimeout(() => setShakeRow(s => (s === r ? null : s)), 500);
       };
 
-      const meta = mode === '2player'
+      const meta = (mode === 'l' || mode === 'r')
         ? `Round ${tp.round + 1} of ${TOTAL_ROUNDS} · ${tp.players[tp.turn]}'s turn`
         : '';
 
@@ -1084,7 +1302,7 @@
         `;
       }
 
-      const rightAction = mode === 'solo'
+      const rightAction = mode === 's'
         ? html`<button class="tb-new-btn" onClick=${() => dispatch({ type: 'NEW_SOLO_GAME' })}>New Game</button>`
         : null;
 
@@ -1119,7 +1337,10 @@
     }
 
     function SoloSummary({ state, dispatch }) {
-      const { won, word, guesses } = state.soloSummary;
+      const g = getCurrentGame(state) ?? emptyGame();
+      const won = g.won;
+      const word = g.target;
+      const guesses = g.guesses.length;
       const sub = won
         ? (guesses === 1 ? 'You came ready.'
            : guesses <= 3 ? 'Nicely limbered up.'
@@ -1169,8 +1390,11 @@
     }
 
     function RoundSummary({ state, dispatch }) {
-      const { tp, roundSummary } = state;
-      const completedRoundIdx = roundSummary.completedRoundIdx;
+      const g = getCurrentGame(state) ?? emptyGame();
+      const tp = { players: g.players, results: g.results };
+      // We land here right after the second player finishes the round, so
+      // the "just-completed" round is the one currently pointed at by g.round.
+      const completedRoundIdx = g.round;
       const next = completedRoundIdx + 2;
       const r0 = tp.results[completedRoundIdx][0];
       const r1 = tp.results[completedRoundIdx][1];
@@ -1201,8 +1425,9 @@
     }
 
     function GameOver({ state, dispatch }) {
-      const { tp, gameOver } = state;
-      const { type, winnerIdx, roundsPlayed, t0, t1 } = gameOver;
+      const g = getCurrentGame(state) ?? emptyGame();
+      const tp = { players: g.players, results: g.results };
+      const { type, winnerIdx, roundsPlayed, t0, t1 } = gameOverDetails(g);
 
       let icon, headlineHtml, subHtml;
       if (type === 'stump') {
