@@ -125,7 +125,9 @@ Components read the active game via `getCurrentGame(state)`; reducer actions mut
 
 ## Game encoding
 
-`encodeGame(game) → base64url(JSON)` is the **shared serialization** used both for the URL hash (remote shares) and for each entry in the on-disk games dict. Short keys, single-char score codes (`'a'`/`'p'`/`'c'`). Versioned via `v: 1`.
+`encodeGame(game) → LZ-string compressed JSON` is the **shared serialization** used both for the URL hash (remote shares) and for each entry in the on-disk games dict. Short keys, single-char score codes (`'a'`/`'p'`/`'c'`). Versioned via `v: 1`. The output of `LZString.compressToEncodedURIComponent` is already URL-component-safe — no separate base64 step needed.
+
+`decodeGame` dual-decodes: tries the current LZ-string format first, falls back to the legacy plain `base64url(JSON)` format used in earlier versions so URLs and saves from before this commit still work. Typical URL payload sizes: ~217 chars (LZ) vs ~290 chars (legacy base64url) on a fresh challenge — about 25% smaller, with bigger savings on filled-out mid-game states. Real practical win is denser → sparser QR codes that scan better in poor lighting.
 
 ## Remote 2-player mode (mode `'r'`)
 

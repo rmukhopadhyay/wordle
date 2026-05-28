@@ -268,6 +268,7 @@
     import { useReducer, useEffect, useState, useRef, useCallback, useMemo } from 'https://esm.sh/preact@10.22.0/hooks';
     import htm from 'https://esm.sh/htm@3.1.1';
     import qrcode from 'https://esm.sh/qrcode-generator@1.4.4';
+    import LZString from 'https://esm.sh/lz-string@1.5.0';
 
     const html = htm.bind(h);
 
@@ -505,8 +506,13 @@
     function stampGame(game) { return { ...game, _lastUpdate: Date.now() }; }
 
     // ── Game encoding (shared between URL hash and on-disk dict) ──────────
-    // Compact JSON with short keys; scores as single chars ('a'/'p'/'c').
-    // base64url-wrapped at the boundary.
+    // Compact JSON with short keys + single-char score codes, then run
+    // through LZ-string compressToEncodedURIComponent — the output is both
+    // compressed AND URL-component-safe (no further base64 step needed).
+    //
+    // Backward compatibility: decodeGame tries LZ-string first, falls back
+    // to the legacy plain base64url format so URLs/saves from earlier
+    // versions still decode. Phases 1–5 used `b64UrlEncode(JSON.stringify(p))`.
     function encodeGame(g) {
       const packed = {
         v: GAME_VERSION,
@@ -522,13 +528,19 @@
         ov: g.over, wn: g.won,
       };
       if (g.mode === 'r') { packed.for = g.turnFor; packed.tc = g.turnCounter; }
-      return b64UrlEncode(JSON.stringify(packed));
+      return LZString.compressToEncodedURIComponent(JSON.stringify(packed));
     }
 
     function decodeGame(str) {
-      try {
-        const p = JSON.parse(b64UrlDecode(str));
-        if (!p || p.v !== GAME_VERSION) return null;
+      const tryParse = (text) => {
+        if (!text) return null;
+        try {
+          const p = JSON.parse(text);
+          if (!p || p.v !== GAME_VERSION) return null;
+          return p;
+        } catch (e) { return null; }
+      };
+      const materialize = (p) => {
         const SCORE = { a: 'absent', p: 'present', c: 'correct' };
         return emptyGame({
           id: p.id, mode: p.m,
@@ -543,7 +555,20 @@
           over: !!p.ov, won: !!p.wn,
           turnFor: p.for, turnCounter: p.tc,
         });
-      } catch (e) { return null; }
+      };
+      // Try LZ-string (current format)
+      let parsed = null;
+      try {
+        const text = LZString.decompressFromEncodedURIComponent(str);
+        parsed = tryParse(text);
+      } catch (e) { /* fall through */ }
+      // Fall back to legacy base64url (Phase 1–5 format)
+      if (!parsed) {
+        try {
+          parsed = tryParse(b64UrlDecode(str));
+        } catch (e) { /* fall through */ }
+      }
+      return parsed ? materialize(parsed) : null;
     }
 
     function b64UrlEncode(str) {
