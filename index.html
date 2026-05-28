@@ -106,13 +106,21 @@
     .eye-btn:hover{color:var(--text);}
     .we-row-err{color:#e57373;font-size:.75rem;text-align:left;min-height:16px;}
 
-    /* Handoff */
-    #s-handoff{min-height:100vh;justify-content:center;}
+    /* Handoff / Share */
+    #s-handoff,#s-share{min-height:100vh;justify-content:center;}
     .ho-body{flex:1;display:flex;flex-direction:column;align-items:center;
              justify-content:center;gap:22px;padding:40px 32px;text-align:center;}
     .ho-icon{font-size:3rem;}
     .ho-body h2{font-size:1.4rem;font-weight:700;}
     .ho-body p{color:var(--muted);line-height:1.7;font-size:.9rem;}
+    .share-url{font-family:'SF Mono','Monaco','Courier New',monospace;font-size:.7rem;
+               background:#1a1a1b;border:1px solid var(--border);border-radius:6px;
+               padding:10px 12px;word-break:break-all;color:var(--muted);
+               max-width:340px;cursor:pointer;line-height:1.4;}
+    .share-url:hover{color:var(--text);border-color:#565758;}
+
+    /* Remote setup screen reuses setup-body + we-* styles */
+    #s-remote-setup,#s-accept-challenge{min-height:100vh;}
 
     /* Game */
     #s-game{min-height:100vh;}
@@ -380,6 +388,34 @@
       return emptyGame({ id: randomGameId(), mode: 'l', players: [p1, p2] });
     }
 
+    function newRemoteGame(p1Name, p2Name, p1WordsForP2) {
+      // Initiator (P1) is creating the game and has just entered their 3
+      // words for P2 to guess. Opponent (P2) is up next: they need to enter
+      // their words for P1 to guess before any rounds can be played.
+      const cf = [[], p1WordsForP2.slice()];
+      return emptyGame({
+        id: randomGameId(),
+        mode: 'r',
+        players: [p1Name, p2Name],
+        challengeFor: cf,
+        wordEntryPhase: 1,
+        turnFor: 1,        // opponent receives the share URL
+        turnCounter: 1,    // first turn of the match
+      });
+    }
+
+    // Where should a freshly-loaded URL game land the receiver?
+    // We assume the receiver IS the next player (turnFor) — Phase 2 punts on
+    // divergence detection (older-link / wrong-recipient handling).
+    function screenForReceivedGame(g) {
+      if (!g) return 'home';
+      if (g.over) return 'game-over';
+      if (g.mode === 'r' && (!g.challengeFor[0] || g.challengeFor[0].length === 0)) {
+        return 'accept-challenge';
+      }
+      return 'game';
+    }
+
     function getCurrentGame(state) {
       return state.currentGameId ? state.games[state.currentGameId] : null;
     }
@@ -453,6 +489,27 @@
       return new TextDecoder().decode(bytes);
     }
 
+    // ── URL share helpers ─────────────────────────────────────────────────
+    // Share URL format: <origin><path>#r:<encodedGame>
+    // The 'r:' prefix is a marker so other future hashes (deep links, etc.)
+    // can coexist. Hash, not query, keeps state client-side (no Pages roundtrip).
+    const URL_PREFIX = 'r:';
+
+    function parseUrlGame() {
+      const h = location.hash || '';
+      if (!h.startsWith('#' + URL_PREFIX)) return null;
+      return decodeGame(h.slice(1 + URL_PREFIX.length));
+    }
+
+    function buildShareUrl(game) {
+      const base = location.origin + location.pathname;
+      return base + '#' + URL_PREFIX + encodeGame(game);
+    }
+
+    function clearUrlHash() {
+      try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+    }
+
     // ── Reducer ───────────────────────────────────────────────────────────
 
     const initialState = {
@@ -491,6 +548,58 @@
 
         case 'PICK_TWO_PLAYER':
           return { ...state, screen: 'setup' };
+
+        case 'PICK_REMOTE':
+          return { ...state, screen: 'remote-setup' };
+
+        case 'REMOTE_SETUP_DONE': {
+          // Initiator (P1) finished entering their name, opponent name, and
+          // 3 secret words for opponent. Game is created; opponent's setup
+          // is next, so the share URL is for them.
+          const game = newRemoteGame(action.p1, action.p2, action.words);
+          return {
+            ...state,
+            screen: 'share',
+            currentGameId: game.id,
+            games: { ...state.games, [game.id]: game },
+            handoff: null, pendingContinue: false, revealing: false,
+          };
+        }
+
+        case 'REMOTE_ACCEPT_DONE': {
+          // Opponent (P2) just entered their 3 words. Both players' words are
+          // now locked in. Advance the game state to P1's R1 so the URL that
+          // gets shared back encodes "P1's turn now, here's your target."
+          const g = getCurrentGame(state);
+          if (!g) return state;
+          const challengeFor = g.challengeFor.map(arr => arr.slice());
+          challengeFor[0] = action.words.slice();
+          return withCurrentGame({ ...state, screen: 'share' }, {
+            challengeFor,
+            wordEntryPhase: 1,
+            round: 0, turn: 0,
+            target: challengeFor[0][0],
+            guesses: [], scores: [], current: '',
+            over: false, won: false,
+            turnFor: 0,
+            turnCounter: (g.turnCounter || 1) + 1,
+          });
+        }
+
+        case 'LOAD_FROM_URL': {
+          // Phase 2 punts on divergence: incoming state always overwrites.
+          // The receiver is assumed to be turnFor (the recipient of the share).
+          const incoming = action.game;
+          if (!incoming || !incoming.id) return state;
+          const games = { ...state.games, [incoming.id]: incoming };
+          return {
+            ...state,
+            screen: screenForReceivedGame(incoming),
+            currentGameId: incoming.id,
+            games,
+            handoff: null, pendingContinue: false, revealing: false,
+          };
+        }
 
         case 'GO_HOME': {
           // Keep the games dict (so non-current games survive), but drop the
@@ -615,11 +724,18 @@
             return withCurrentGame({ ...state, revealing: false, screen: 'solo-summary' },
                                    { over: true, won });
           }
-          // 2-player: record the round result + show continue overlay
           const results = g.results.map(r => r.slice());
           results[g.round][g.turn] = { solved: won, guesses: g.guesses.length };
-          return withCurrentGame({ ...state, revealing: false, pendingContinue: true },
-                                 { over: true, won, results });
+          if (g.mode === 'l') {
+            // Local 2P: show continue overlay so the device gets passed.
+            return withCurrentGame({ ...state, revealing: false, pendingContinue: true },
+                                   { over: true, won, results });
+          }
+          // Remote 2P: advance to the next player's state and head to the
+          // share screen. The URL we generate is what gets sent to the
+          // opponent, who will pick up exactly where the new state points.
+          return withCurrentGame({ ...state, revealing: false, screen: 'share' },
+                                 advanceRemoteAfterTurn(g, results, won));
         }
 
         case 'CONTINUE_FROM_TURN': {
@@ -676,6 +792,47 @@
       if (r0.solved !== r1.solved) return { ...state, screen: 'game-over' };
       if (roundIdx === TOTAL_ROUNDS - 1) return { ...state, screen: 'game-over' };
       return { ...state, screen: 'round-summary' };
+    }
+
+    // After a remote-mode turn completes, compute the game-state updates
+    // that position the URL recipient at exactly the right next step:
+    //   - If P1 just played → swap to P2's turn for the same round
+    //   - If P2 just played and round eval says continue → advance to next
+    //     round at P1's turn 0
+    //   - If P2 just played and game should end (asymmetric stump OR last
+    //     round) → mark over and record the winning side
+    function advanceRemoteAfterTurn(g, results, justWon) {
+      const counter = (g.turnCounter || 0) + 1;
+      if (g.turn === 0) {
+        return {
+          results, turn: 1, round: g.round,
+          target: g.challengeFor[1][g.round],
+          guesses: [], scores: [], current: '',
+          over: false, won: false,
+          turnFor: 1, turnCounter: counter,
+        };
+      }
+      // turn === 1: both players played this round
+      const r0 = results[g.round][0];
+      const r1 = results[g.round][1];
+      const asymmetric = r0.solved !== r1.solved;
+      const lastRound = g.round === TOTAL_ROUNDS - 1;
+      if (asymmetric || lastRound) {
+        return {
+          results,
+          over: true, won: justWon,
+          turnFor: 0, turnCounter: counter,
+        };
+      }
+      // Continue to next round
+      return {
+        results,
+        round: g.round + 1, turn: 0,
+        target: g.challengeFor[0][g.round + 1],
+        guesses: [], scores: [], current: '',
+        over: false, won: false,
+        turnFor: 0, turnCounter: counter,
+      };
     }
 
     // Display helpers — derived view from the current game.
@@ -886,6 +1043,18 @@
         if (authed) writeAuth();
       }, []);
 
+      // Process incoming share URL once auth lands. The hash gets stripped
+      // after we read it so a returning user sees their actual local state
+      // (active games list etc.) rather than the same old turn re-loading.
+      useEffect(() => {
+        if (!authed) return;
+        const incoming = parseUrlGame();
+        if (incoming) {
+          dispatch({ type: 'LOAD_FROM_URL', game: incoming });
+          clearUrlHash();
+        }
+      }, [authed]);
+
       const onLogout = useCallback(() => {
         clearAuth();
         clearSaves();
@@ -896,15 +1065,18 @@
       if (!authed) return html`<${Login} onSuccess=${() => setAuthed(true)} />`;
 
       switch (state.screen) {
-        case 'home':          return html`<${Home} dispatch=${dispatch} onLogout=${onLogout} />`;
-        case 'setup':         return html`<${Setup} state=${state} dispatch=${dispatch} />`;
-        case 'word-entry':    return html`<${WordEntry} state=${state} dispatch=${dispatch} />`;
-        case 'handoff':       return html`<${Handoff} state=${state} dispatch=${dispatch} />`;
-        case 'game':          return html`<${Game} state=${state} dispatch=${dispatch} />`;
-        case 'solo-summary':  return html`<${SoloSummary} state=${state} dispatch=${dispatch} />`;
-        case 'round-summary': return html`<${RoundSummary} state=${state} dispatch=${dispatch} />`;
-        case 'game-over':     return html`<${GameOver} state=${state} dispatch=${dispatch} />`;
-        default:              return html`<${Home} dispatch=${dispatch} onLogout=${onLogout} />`;
+        case 'home':              return html`<${Home} dispatch=${dispatch} onLogout=${onLogout} />`;
+        case 'setup':             return html`<${Setup} state=${state} dispatch=${dispatch} />`;
+        case 'remote-setup':      return html`<${RemoteSetup} state=${state} dispatch=${dispatch} />`;
+        case 'accept-challenge':  return html`<${AcceptChallenge} state=${state} dispatch=${dispatch} />`;
+        case 'word-entry':        return html`<${WordEntry} state=${state} dispatch=${dispatch} />`;
+        case 'handoff':           return html`<${Handoff} state=${state} dispatch=${dispatch} />`;
+        case 'share':             return html`<${ShareScreen} state=${state} dispatch=${dispatch} />`;
+        case 'game':              return html`<${Game} state=${state} dispatch=${dispatch} />`;
+        case 'solo-summary':      return html`<${SoloSummary} state=${state} dispatch=${dispatch} />`;
+        case 'round-summary':     return html`<${RoundSummary} state=${state} dispatch=${dispatch} />`;
+        case 'game-over':         return html`<${GameOver} state=${state} dispatch=${dispatch} />`;
+        default:                  return html`<${Home} dispatch=${dispatch} onLogout=${onLogout} />`;
       }
     }
 
@@ -962,8 +1134,9 @@
         <div id="s-home" class="screen">
           <div class="home-body">
             <div class="logo">TWORDLE</div>
-            <div class="sub">Pass-and-play head-to-head — or warm up solo</div>
-            <button class="btn btn-g" onClick=${() => dispatch({ type: 'PICK_TWO_PLAYER' })}>⚔ 2 Player</button>
+            <div class="sub">Play remotely with a friend — or pass-and-play in person</div>
+            <button class="btn btn-g" onClick=${() => dispatch({ type: 'PICK_REMOTE' })}>⚔ Play Remotely</button>
+            <button class="btn btn-o" onClick=${() => dispatch({ type: 'PICK_TWO_PLAYER' })}>⚔ Pass & Play</button>
             <button class="btn btn-o" onClick=${() => dispatch({ type: 'PICK_SOLO' })}>Solo Play</button>
             <button id="logout-btn" onClick=${onLogout}>Sign out</button>
           </div>
@@ -1001,6 +1174,201 @@
                      onKeyDown=${e => { if (e.key === 'Enter') submit(); }} /></div>
             <div class="err">${err}</div>
             <button class="btn btn-g" onClick=${submit}>Let's Play!</button>
+          </div>
+        </div>
+      `;
+    }
+
+    // Initiator's first turn in a remote match: enter both names and the 3
+    // secret words for the opponent in one screen. On submit, the game is
+    // created and we transition to the share screen.
+    function RemoteSetup({ state, dispatch }) {
+      const [p1, setP1] = useState('');
+      const [p2, setP2] = useState('');
+      const [words, setWords] = useState(['', '', '']);
+      const [reveal, setReveal] = useState([false, false, false]);
+      const [errs, setErrs] = useState(['', '', '']);
+      const [err, setErr] = useState('');
+      const p1Ref = useRef(null);
+      const wordRefs = [useRef(null), useRef(null), useRef(null)];
+
+      useEffect(() => { setTimeout(() => p1Ref.current?.focus(), 250); }, []);
+
+      const setWord = (i, v) => {
+        const cleaned = v.replace(/[^a-zA-Z]/g, '');
+        setWords(prev => { const w = prev.slice(); w[i] = cleaned; return w; });
+        setErrs(prev => { const e = prev.slice(); e[i] = ''; return e; });
+        setErr('');
+      };
+      const toggleEye = i => setReveal(prev => { const r = prev.slice(); r[i] = !r[i]; return r; });
+
+      const submit = () => {
+        const a = p1.trim(), b = p2.trim();
+        if (!a || !b) return setErr('Enter both names.');
+        if (a.toLowerCase() === b.toLowerCase()) return setErr('Players need different names!');
+        let ok = true;
+        const newErrs = ['', '', ''];
+        const upper = [];
+        for (let i = 0; i < TOTAL_ROUNDS; i++) {
+          const raw = words[i].trim().toLowerCase();
+          if (raw.length !== 5) { newErrs[i] = 'Must be exactly 5 letters.'; ok = false; }
+          else if (!ANSWERS_SET.has(raw)) {
+            newErrs[i] = `"${raw.toUpperCase()}" isn't valid — try a more common word.`; ok = false;
+          } else upper.push(raw.toUpperCase());
+        }
+        setErrs(newErrs);
+        if (!ok) return;
+        if (new Set(upper).size < upper.length) return setErr('Each round needs a different word!');
+        dispatch({ type: 'REMOTE_SETUP_DONE', p1: a, p2: b, words: upper });
+      };
+
+      return html`
+        <div id="s-remote-setup" class="screen">
+          <${TopBar} state=${state} dispatch=${dispatch} title="Play Remotely" />
+          <div class="setup-body">
+            <p class="we-prompt">Enter your name and your opponent's. Then choose 3 secret words for them to guess — one per round.</p>
+            <div class="field"><label>Your name</label>
+              <input class="tinput" type="text" placeholder="e.g. Alice" maxlength="16"
+                     ref=${p1Ref} value=${p1} onInput=${e => { setP1(e.target.value); setErr(''); }} /></div>
+            <div class="field"><label>Opponent's name</label>
+              <input class="tinput" type="text" placeholder="e.g. Bob" maxlength="16"
+                     value=${p2} onInput=${e => { setP2(e.target.value); setErr(''); }} /></div>
+            <div class="we-fields">
+              ${[0,1,2].map(i => html`
+                <div class="we-row" key=${i}>
+                  <label>Round ${i + 1}</label>
+                  <div class="wrap-eye">
+                    <input class="tinput word-w-input" type=${reveal[i] ? 'text' : 'password'} maxlength="5"
+                           placeholder="· · · · ·" autocomplete="off" spellcheck="false"
+                           ref=${wordRefs[i]} value=${words[i]}
+                           onInput=${e => setWord(i, e.target.value)}
+                           onKeyDown=${e => { if (e.key === 'Enter' && i < 2) wordRefs[i+1].current?.focus(); else if (e.key === 'Enter') submit(); }} />
+                    <button class="eye-btn" onClick=${() => toggleEye(i)}>${reveal[i] ? '🙈' : '👁'}</button>
+                  </div>
+                  <div class="we-row-err">${errs[i]}</div>
+                </div>
+              `)}
+            </div>
+            <div class="err">${err}</div>
+            <button class="btn btn-g" onClick=${submit}>Generate Challenge →</button>
+          </div>
+        </div>
+      `;
+    }
+
+    // Opponent's first turn: just received an invite URL. The game already
+    // contains the initiator's name + their 3 words for us. We enter our
+    // 3 words for them, then transition to share back.
+    function AcceptChallenge({ state, dispatch }) {
+      const g = getCurrentGame(state);
+      const initiator = g?.players[0] || 'Your friend';
+      const opponent = g?.players[1] || 'You';
+      const [words, setWords] = useState(['', '', '']);
+      const [reveal, setReveal] = useState([false, false, false]);
+      const [errs, setErrs] = useState(['', '', '']);
+      const [globalErr, setGlobalErr] = useState('');
+      const refs = [useRef(null), useRef(null), useRef(null)];
+
+      useEffect(() => { setTimeout(() => refs[0].current?.focus(), 250); }, []);
+
+      const setWord = (i, v) => {
+        const cleaned = v.replace(/[^a-zA-Z]/g, '');
+        setWords(prev => { const w = prev.slice(); w[i] = cleaned; return w; });
+        setErrs(prev => { const e = prev.slice(); e[i] = ''; return e; });
+        setGlobalErr('');
+      };
+      const toggleEye = i => setReveal(prev => { const r = prev.slice(); r[i] = !r[i]; return r; });
+      const onKey = (e, i) => {
+        if (e.key === 'Enter') { if (i < TOTAL_ROUNDS - 1) refs[i+1].current?.focus(); else submit(); }
+      };
+      const submit = () => {
+        let ok = true;
+        const newErrs = ['', '', ''];
+        const upper = [];
+        for (let i = 0; i < TOTAL_ROUNDS; i++) {
+          const raw = words[i].trim().toLowerCase();
+          if (raw.length !== 5) { newErrs[i] = 'Must be exactly 5 letters.'; ok = false; }
+          else if (!ANSWERS_SET.has(raw)) {
+            newErrs[i] = `"${raw.toUpperCase()}" isn't valid — try a more common word.`; ok = false;
+          } else upper.push(raw.toUpperCase());
+        }
+        setErrs(newErrs);
+        if (!ok) return;
+        if (new Set(upper).size < upper.length) return setGlobalErr('Each round needs a different word!');
+        dispatch({ type: 'REMOTE_ACCEPT_DONE', words: upper });
+      };
+
+      return html`
+        <div id="s-accept-challenge" class="screen">
+          <${TopBar} state=${state} dispatch=${dispatch} badge=${`${initiator}'s challenge`} />
+          <div class="we-body">
+            <p class="we-prompt" dangerouslySetInnerHTML=${{
+              __html: `<strong>${initiator}</strong> challenged <strong>${opponent}</strong> to a Twordle match.<br>Enter 3 secret words for them to guess — one per round.`,
+            }}></p>
+            <div class="we-fields">
+              ${[0,1,2].map(i => html`
+                <div class="we-row" key=${i}>
+                  <label>Round ${i + 1}</label>
+                  <div class="wrap-eye">
+                    <input class="tinput word-w-input" type=${reveal[i] ? 'text' : 'password'} maxlength="5"
+                           placeholder="· · · · ·" autocomplete="off" spellcheck="false"
+                           ref=${refs[i]} value=${words[i]}
+                           onInput=${e => setWord(i, e.target.value)}
+                           onKeyDown=${e => onKey(e, i)} />
+                    <button class="eye-btn" onClick=${() => toggleEye(i)}>${reveal[i] ? '🙈' : '👁'}</button>
+                  </div>
+                  <div class="we-row-err">${errs[i]}</div>
+                </div>
+              `)}
+            </div>
+            <div class="err">${globalErr}</div>
+            <button class="btn btn-g" onClick=${submit}>Send Back →</button>
+          </div>
+        </div>
+      `;
+    }
+
+    // Replaces the local Handoff screen when it's time to send the URL out.
+    // Phase 2: copy-link button only. Phase 3 adds Web Share API + QR.
+    function ShareScreen({ state, dispatch }) {
+      const g = getCurrentGame(state) ?? emptyGame();
+      const [copied, setCopied] = useState(false);
+      const url = useMemo(() => buildShareUrl(g), [g]);
+      const recipient = g.players[g.turnFor ?? 1] || 'your opponent';
+
+      // Heading / sub depend on what just happened on this device.
+      let heading, sub;
+      if (g.over) {
+        heading = 'Match over!';
+        sub = `Share the final result with <strong>${recipient}</strong> so they can see how it ended.`;
+      } else if (g.turnCounter === 1) {
+        heading = 'Challenge ready';
+        sub = `Send this to <strong>${recipient}</strong> to accept the challenge and play.`;
+      } else if (g.turnCounter === 2 && g.guesses.length === 0 && g.round === 0 && g.turn === 0) {
+        heading = 'Words locked in';
+        sub = `Send this back to <strong>${recipient}</strong> to start Round 1.`;
+      } else {
+        heading = 'Your turn done';
+        sub = `Send this to <strong>${recipient}</strong> so they can take their turn.`;
+      }
+
+      const copy = async () => {
+        try { await navigator.clipboard.writeText(url); }
+        catch (e) { /* fall back below */ }
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1800);
+      };
+
+      return html`
+        <div id="s-share" class="screen">
+          <${TopBar} state=${state} dispatch=${dispatch} badge="Share" />
+          <div class="ho-body">
+            <div class="ho-icon">📨</div>
+            <h2>${heading}</h2>
+            <p dangerouslySetInnerHTML=${{ __html: sub }}></p>
+            <div class="share-url" onClick=${copy}>${url}</div>
+            <button class="btn btn-g" onClick=${copy}>${copied ? 'Copied! ✓' : 'Copy Link'}</button>
+            <button class="btn btn-o" onClick=${() => dispatch({ type: 'GO_HOME' })}>Done</button>
           </div>
         </div>
       `;

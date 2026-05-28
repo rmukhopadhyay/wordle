@@ -127,6 +127,28 @@ Components read the active game via `getCurrentGame(state)`; reducer actions mut
 
 `encodeGame(game) → base64url(JSON)` is the **shared serialization** used both for the URL hash (remote shares) and for each entry in the on-disk games dict. Short keys, single-char score codes (`'a'`/`'p'`/`'c'`). Versioned via `v: 1`.
 
+## Remote 2-player mode (mode `'r'`)
+
+Same per-game shape as local 2P, but each device-handoff is replaced by sharing a URL. URL format: `<base>#r:<encodedGame>`. The hash is read once on App mount (after auth), dispatched as `LOAD_FROM_URL`, then stripped via `history.replaceState`.
+
+Turn order (initiator = P1, plays first):
+1. P1 enters their name, opponent name, and 3 secret words → `REMOTE_SETUP_DONE` → ShareScreen
+2. P2 opens link → AcceptChallenge → enters their 3 words → `REMOTE_ACCEPT_DONE` → ShareScreen (sends back)
+3. P1 opens link → game R1 → plays → `REVEAL_DONE` advances state for P2 → ShareScreen
+4. P2 opens link → game R1 → plays → both rounds done, eval determines next → ShareScreen
+5. … alternates through R2, R3 → game-over
+
+`advanceRemoteAfterTurn(g, results, justWon)` computes the state updates that position the URL recipient *exactly* at the right step (their target, their turn). If P1 just played, swap to P2's turn for the same round. If P2 just played and round eval continues, advance to next round at P1's turn 0. If asymmetric stump or last round, mark over.
+
+`turnFor` indicates which player the URL is meant for; `turnCounter` is a monotonic per-game counter (Phase 2 stores it but doesn't yet enforce divergence detection — see open work below).
+
+### Open work / known gaps (deferred)
+
+- **No round-summary interstitial in remote.** After a tied/continued round, the receiver lands directly on their next round; they don't see a scoreboard for the just-completed round.
+- **No "this link is stale" detection.** A receiver opening an older link silently overwrites their state.
+- **No way to re-surface the share URL after navigating home.** Phase 3's active-games list is intended to cover this.
+- **No anti-peek for secret words.** A curious opponent can `atob()` the hash and see upcoming words.
+
 ---
 
 ## Game State Persistence
