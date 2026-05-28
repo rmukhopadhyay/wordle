@@ -20,13 +20,21 @@
     @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 
     /* header */
-    .ph{width:100%;display:flex;align-items:center;justify-content:center;
-        border-bottom:1px solid var(--border);padding:10px 16px;position:relative;flex-shrink:0;}
-    .ph h1{font-size:1.75rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;}
-    .ph .back{position:absolute;left:14px;background:none;border:none;color:var(--muted);
-              font-size:1.2rem;cursor:pointer;padding:4px 8px;}
-    .ph .back:hover{color:var(--text);}
-    .hstack{display:flex;flex-direction:column;align-items:center;gap:3px;}
+    /* shared top bar (every screen except login & home) */
+    .topbar{width:100%;display:flex;align-items:center;justify-content:center;
+            border-bottom:1px solid var(--border);padding:10px 16px;position:relative;flex-shrink:0;}
+    .topbar h1{font-size:1.75rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;}
+    .tb-center{display:flex;flex-direction:column;align-items:center;gap:3px;}
+    .tb-menu{position:absolute;left:14px;background:none;border:none;color:var(--muted);
+             font-size:.8rem;letter-spacing:.05em;cursor:pointer;padding:6px 8px;touch-action:manipulation;
+             display:flex;align-items:center;gap:4px;transition:color .2s;}
+    .tb-menu:hover{color:var(--text);}
+    .tb-right{position:absolute;right:16px;display:flex;align-items:center;gap:6px;}
+    .tb-meta{font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);}
+    .tb-new-btn{background:none;border:1px solid var(--border);color:var(--muted);
+                font-size:.7rem;letter-spacing:.07em;text-transform:uppercase;touch-action:manipulation;
+                padding:6px 10px;border-radius:4px;cursor:pointer;transition:color .2s,border-color .2s;}
+    .tb-new-btn:hover{color:var(--text);border-color:var(--text);}
     .badge{font-size:.62rem;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
            background:#1e1e1f;border:1px solid var(--border);padding:3px 10px;border-radius:20px;}
 
@@ -108,18 +116,6 @@
 
     /* Game */
     #s-game{min-height:100vh;}
-    #game-header{width:100%;display:flex;align-items:center;justify-content:center;
-                 border-bottom:1px solid var(--border);padding:10px 16px;position:relative;flex-shrink:0;}
-    #game-header h1{font-size:1.75rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;}
-    #game-meta{font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);}
-    #game-new-btn{position:absolute;right:16px;background:none;border:1px solid var(--border);
-                  color:var(--muted);font-size:.7rem;letter-spacing:.07em;text-transform:uppercase;
-                  padding:6px 10px;border-radius:4px;cursor:pointer;transition:color .2s,border-color .2s;}
-    #game-new-btn:hover{color:var(--text);border-color:var(--text);}
-    #game-menu-btn{position:absolute;left:14px;background:none;border:none;color:var(--muted);
-                   font-size:.8rem;letter-spacing:.05em;cursor:pointer;padding:6px 8px;
-                   display:flex;align-items:center;gap:4px;transition:color .2s;}
-    #game-menu-btn:hover{color:var(--text);}
     #game-main{flex:1;display:flex;flex-direction:column;align-items:center;
                justify-content:center;gap:28px;padding:20px 0 10px;position:relative;}
     #cont-overlay{position:absolute;bottom:68px;left:50%;transform:translateX(-50%);z-index:10;}
@@ -218,9 +214,9 @@
               font-size: .72rem; padding: 0 2px; letter-spacing: 0; }
       .key.wide { flex: 1.5; min-width: 0; font-size: .6rem; }
       #game-main  { gap: 16px; padding-top: 12px; }
-      #game-header { padding: 8px 12px; }
-      #game-header h1, .ph h1 { font-size: 1.4rem; }
-      #game-meta { font-size: .55rem; }
+      .topbar { padding: 8px 12px; }
+      .topbar h1 { font-size: 1.4rem; }
+      .tb-meta { font-size: .55rem; }
     }
     #s-game { min-height: 100dvh; }
   </style>
@@ -572,6 +568,38 @@
 
     // ── Components ───────────────────────────────────────────────────────
 
+    // True iff a 2-player match is mid-flight (past setup, before game-over).
+    // Used to decide whether the menu button should confirm before going home.
+    function isInProgressMatch(state) {
+      return state.mode === '2player'
+        && state.tp.players[0] !== ''
+        && state.screen !== 'game-over';
+    }
+
+    // Unified top bar used on every screen except login & home.
+    //  - left: Menu (⌂); confirms if a 2P match is in progress
+    //  - center: title + optional badge (chip) or meta (plain text)
+    //  - right: optional action node (e.g. New Game button on solo game)
+    function TopBar({ state, dispatch, title = 'Twordle', badge, meta, right }) {
+      const onMenu = () => {
+        if (isInProgressMatch(state)) {
+          if (!confirm('End the current 2-player match and return to the menu?')) return;
+        }
+        dispatch({ type: 'GO_HOME' });
+      };
+      return html`
+        <div class="topbar">
+          <button class="tb-menu" onClick=${onMenu}>⌂ Menu</button>
+          <div class="tb-center">
+            <h1>${title}</h1>
+            ${badge ? html`<div class="badge">${badge}</div>` : null}
+            ${meta ? html`<div class="tb-meta">${meta}</div>` : null}
+          </div>
+          ${right ? html`<div class="tb-right">${right}</div>` : null}
+        </div>
+      `;
+    }
+
     function App() {
       const [authed, setAuthed] = useState(() => localStorage.getItem(AUTH_KEY) === AUTH_HASH);
       const [state, dispatch] = useReducer(reducer, null, () => loadSaved() ?? initialState);
@@ -591,7 +619,7 @@
 
       switch (state.screen) {
         case 'home':          return html`<${Home} dispatch=${dispatch} onLogout=${onLogout} />`;
-        case 'setup':         return html`<${Setup} dispatch=${dispatch} />`;
+        case 'setup':         return html`<${Setup} state=${state} dispatch=${dispatch} />`;
         case 'word-entry':    return html`<${WordEntry} state=${state} dispatch=${dispatch} />`;
         case 'handoff':       return html`<${Handoff} state=${state} dispatch=${dispatch} />`;
         case 'game':          return html`<${Game} state=${state} dispatch=${dispatch} />`;
@@ -665,7 +693,7 @@
       `;
     }
 
-    function Setup({ dispatch }) {
+    function Setup({ state, dispatch }) {
       const [p1, setP1] = useState('');
       const [p2, setP2] = useState('');
       const [err, setErr] = useState('');
@@ -683,10 +711,7 @@
 
       return html`
         <div id="s-setup" class="screen">
-          <div class="ph">
-            <button class="back" onClick=${() => dispatch({ type: 'GO_HOME' })}>←</button>
-            <h1>2 Player</h1>
-          </div>
+          <${TopBar} state=${state} dispatch=${dispatch} title="2 Player" />
           <div class="setup-body">
             <h2>Enter player names</h2>
             <div class="field"><label>Player 1</label>
@@ -758,9 +783,7 @@
 
       return html`
         <div id="s-word-entry" class="screen">
-          <div class="ph">
-            <div class="hstack"><h1>Twordle</h1><div class="badge">${setter}'s words</div></div>
-          </div>
+          <${TopBar} state=${state} dispatch=${dispatch} badge=${`${setter}'s words`} />
           <div class="we-body">
             <p class="we-prompt" dangerouslySetInnerHTML=${{
               __html: `<strong>${setter}</strong>, enter 3 secret words for <strong>${guesser}</strong> to solve — one per round:`
@@ -792,9 +815,7 @@
       const { badge, icon, title, desc, btnText, next } = state.handoff;
       return html`
         <div id="s-handoff" class="screen">
-          <div class="ph">
-            <div class="hstack"><h1>Twordle</h1><div class="badge">${badge}</div></div>
-          </div>
+          <${TopBar} state=${state} dispatch=${dispatch} badge=${badge} />
           <div class="ho-body">
             <div class="ho-icon">${icon}</div>
             <h2>${title}</h2>
@@ -945,16 +966,6 @@
         setTimeout(() => setShakeRow(s => (s === r ? null : s)), 500);
       };
 
-      const onMenuClick = () => {
-        if (over || mode === 'solo') {
-          dispatch({ type: 'GO_HOME' });
-        } else {
-          if (confirm('End the current 2-player game and return to the menu?')) {
-            dispatch({ type: 'GO_HOME' });
-          }
-        }
-      };
-
       const meta = mode === '2player'
         ? `Round ${tp.round + 1} of ${TOTAL_ROUNDS} · ${tp.players[tp.turn]}'s turn`
         : '';
@@ -1008,18 +1019,13 @@
         `;
       }
 
+      const rightAction = mode === 'solo'
+        ? html`<button class="tb-new-btn" onClick=${() => dispatch({ type: 'NEW_SOLO_GAME' })}>New Game</button>`
+        : null;
+
       return html`
         <div id="s-game" class="screen">
-          <div id="game-header">
-            <button id="game-menu-btn" onClick=${onMenuClick}>⌂ Menu</button>
-            <div class="hstack">
-              <h1>TWORDLE</h1>
-              ${meta && html`<div id="game-meta">${meta}</div>`}
-            </div>
-            ${mode === 'solo' && html`
-              <button id="game-new-btn" onClick=${() => dispatch({ type: 'NEW_SOLO_GAME' })}>New Game</button>
-            `}
-          </div>
+          <${TopBar} state=${state} dispatch=${dispatch} title="TWORDLE" meta=${meta || null} right=${rightAction} />
           <div id="game-main">
             <div id="board">${tiles}</div>
             <div id="keyboard">
@@ -1057,7 +1063,7 @@
         : "Brain's not warm yet — that one was tricky.";
       return html`
         <div id="s-solo-summary" class="screen">
-          <div class="ph"><h1>Twordle</h1></div>
+          <${TopBar} state=${state} dispatch=${dispatch} />
           <div class="ss-body">
             <div class="ss-icon">${won ? '🎉' : '😔'}</div>
             <h2>${won ? `Solved in ${guesses}!` : 'Stumped!'}</h2>
@@ -1111,9 +1117,7 @@
 
       return html`
         <div id="s-round-summary" class="screen">
-          <div class="ph">
-            <div class="hstack"><h1>Twordle</h1><div class="badge">After Round ${completedRoundIdx + 1}</div></div>
-          </div>
+          <${TopBar} state=${state} dispatch=${dispatch} badge=${`After Round ${completedRoundIdx + 1}`} />
           <div class="rs-body">
             <div class="rs-label">Scoreboard</div>
             <${Scoreboard} players=${tp.players} results=${tp.results} roundsPlayed=${completedRoundIdx + 1} />
@@ -1155,7 +1159,7 @@
 
       return html`
         <div id="s-game-over" class="screen">
-          <div class="ph"><h1>Twordle</h1></div>
+          <${TopBar} state=${state} dispatch=${dispatch} />
           <div class="go-body">
             <div class="go-icon">${icon}</div>
             <h2 dangerouslySetInnerHTML=${{ __html: headlineHtml }}></h2>

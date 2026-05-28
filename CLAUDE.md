@@ -144,6 +144,13 @@ Handoff `next` is stored as `{type: 'START_TURN', round, player}` (data, not a f
 | `RoundSummary` | `round-summary` | Scoreboard + next-round handoff trigger |
 | `GameOver` | `game-over` | Stump / guess-total / tie outcome + final scoreboard |
 | `Scoreboard` | (shared) | Used by RoundSummary and GameOver |
+| `TopBar` | (shared) | Unified header on every screen except `login` & `home`. Owns the menu/home button. |
+
+### TopBar and the menu confirmation rule
+
+`TopBar` props: `state`, `dispatch`, optional `title`, `badge` (chip), `meta` (plain text under title), `right` (action node, e.g. solo's New Game). It renders a `⌂ Menu` button on the left that always goes home — but confirms first if a 2-player match is in progress.
+
+"In progress" = `isInProgressMatch(state)`: `mode === '2player'` AND `tp.players[0] !== ''` AND `screen !== 'game-over'`. That covers word-entry, handoff, game (2P), and round-summary — every screen where bailing out would discard a live match. Setup is in 2P mode but `players[0]` is empty until SETUP_DONE, so it skips the confirm. Game-over and solo-summary skip it because the match (or solo round) is already done.
 
 ---
 
