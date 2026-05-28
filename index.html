@@ -193,6 +193,12 @@
     .ss-word{font-size:2.2rem;font-weight:800;letter-spacing:.3em;color:var(--correct);}
     .ss-word.miss{color:var(--muted);}
     .ss-sub{color:var(--muted);font-size:.9rem;line-height:1.6;}
+    .ss-cta{background:none;border:none;color:var(--muted);font-size:.85rem;line-height:1.5;
+            cursor:pointer;padding:4px 8px;font-family:inherit;text-align:center;touch-action:manipulation;
+            transition:color .15s;}
+    .ss-cta strong{color:var(--correct);font-weight:700;}
+    .ss-cta:hover{color:var(--text);}
+    .ss-cta:hover strong{filter:brightness(1.15);}
     .ss-actions{display:flex;flex-direction:column;align-items:center;gap:10px;width:100%;}
 
     /* Toast */
@@ -837,7 +843,9 @@
             setBouncing(true);
             timers.push(setTimeout(() => setBouncing(false), 800));
             const lastIdx = guesses.length - 1;
-            const msgs = ['Genius!','Magnificent!','Impressive!','Splendid!','Great!','Phew!'];
+            const soloMsgs = ['Warmed up already!','Limber!','Nicely warm!','Hit your stride!','Long warmup!','Phew!'];
+            const duelMsgs = ['Genius!','Magnificent!','Impressive!','Splendid!','Great!','Phew!'];
+            const msgs = mode === 'solo' ? soloMsgs : duelMsgs;
             timers.push(setTimeout(() => toast(msgs[Math.min(lastIdx, msgs.length - 1)], 2200), 400));
             if (mode === 'solo') {
               timers.push(setTimeout(() => dispatch({ type: 'REVEAL_DONE' }), 2400));
@@ -1042,11 +1050,11 @@
     function SoloSummary({ state, dispatch }) {
       const { won, word, guesses } = state.soloSummary;
       const sub = won
-        ? (guesses === 1 ? 'A hole-in-one. Legendary.'
-           : guesses <= 3 ? 'Impressive — well ahead of average.'
-           : guesses <= 5 ? 'Solid solve!'
-           : 'Got there in the end!')
-        : 'Better luck next time — that one was tricky.';
+        ? (guesses === 1 ? 'You came ready.'
+           : guesses <= 3 ? 'Nicely limbered up.'
+           : guesses <= 5 ? 'A good stretch.'
+           : 'Phew — long warmup.')
+        : "Brain's not warm yet — that one was tricky.";
       return html`
         <div id="s-solo-summary" class="screen">
           <div class="ph"><h1>Twordle</h1></div>
@@ -1055,6 +1063,9 @@
             <h2>${won ? `Solved in ${guesses}!` : 'Stumped!'}</h2>
             <div class=${`ss-word ${won ? '' : 'miss'}`}>${word}</div>
             <p class="ss-sub">${sub}</p>
+            <button class="ss-cta" onClick=${() => dispatch({ type: 'PICK_TWO_PLAYER' })}>
+              Ready for a real challenge? <strong>⚔ 2 Player</strong>
+            </button>
             <div class="ss-actions">
               <button class="btn btn-g" onClick=${() => dispatch({ type: 'NEW_SOLO_GAME' })}>Play Again</button>
               <button class="btn btn-o" onClick=${() => dispatch({ type: 'GO_HOME' })}>← Change Mode</button>
