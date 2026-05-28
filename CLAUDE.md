@@ -144,7 +144,6 @@ Turn order (initiator = P1, plays first):
 
 ### Open work / known gaps (deferred)
 
-- **No round-summary interstitial in remote.** After a tied/continued round, the receiver lands directly on their next round; they don't see a scoreboard for the just-completed round.
 - **No "this link is stale" detection.** A receiver opening an older link silently overwrites their state.
 - **No anti-peek for secret words.** A curious opponent can `atob()` the hash and see upcoming words.
 

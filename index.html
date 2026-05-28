@@ -467,7 +467,21 @@
       if (g.mode === 'r' && (!g.challengeFor[0] || g.challengeFor[0].length === 0)) {
         return 'accept-challenge';
       }
+      // Round-summary handoff: both players just completed a round, eval was
+      // "continue", state hasn't been advanced yet. The receiver sees the
+      // scoreboard before playing the next round.
+      if (g.mode === 'r' && isRemoteAtRoundSummary(g)) return 'round-summary';
       return 'game';
+    }
+
+    // True iff a remote game is paused at "round just completed, eval = continue,
+    // not yet advanced to the next round." Both turn-results are recorded for
+    // the current round but the round hasn't been advanced.
+    function isRemoteAtRoundSummary(g) {
+      if (g.mode !== 'r' || g.over) return false;
+      if (g.round >= TOTAL_ROUNDS - 1) return false;  // last round → game-over, not round-summary
+      const r = g.results[g.round];
+      return !!(r && r[0] && r[1]);
     }
 
     function getCurrentGame(state) {
@@ -475,14 +489,20 @@
     }
 
     // Update the current game via a partial object or an updater function.
+    // Stamps _lastUpdate so the active-games list can sort by recency. The
+    // underscore-prefixed field is in-memory only — encodeGame doesn't pick
+    // it up (it builds `packed` from a fixed allow-list of keys).
     function withCurrentGame(state, update) {
       const id = state.currentGameId;
       if (!id) return state;
       const game = state.games[id];
       if (!game) return state;
       const next = typeof update === 'function' ? update(game) : { ...game, ...update };
+      next._lastUpdate = Date.now();
       return { ...state, games: { ...state.games, [id]: next } };
     }
+
+    function stampGame(game) { return { ...game, _lastUpdate: Date.now() }; }
 
     // ── Game encoding (shared between URL hash and on-disk dict) ──────────
     // Compact JSON with short keys; scores as single chars ('a'/'p'/'c').
@@ -585,7 +605,7 @@
         case 'PICK_SOLO': {
           const game = newSoloGame();
           return { ...state, screen: 'game', currentGameId: game.id,
-                   games: { ...state.games, [game.id]: game },
+                   games: { ...state.games, [game.id]: stampGame(game) },
                    handoff: null, pendingContinue: false, revealing: false };
         }
 
@@ -615,7 +635,7 @@
             ...state,
             screen: 'share',
             currentGameId: game.id,
-            games: { ...state.games, [game.id]: game },
+            games: { ...state.games, [game.id]: stampGame(game) },
             handoff: null, pendingContinue: false, revealing: false,
           };
         }
@@ -653,6 +673,8 @@
             const myRole = game.myRole;
             if (game.challengeFor[0].length === 0 && myRole === 1) {
               screen = 'accept-challenge';
+            } else if (isRemoteAtRoundSummary(game)) {
+              screen = 'round-summary';
             } else if (game.turnFor === myRole) {
               screen = 'game';        // my turn to play
             } else {
@@ -693,7 +715,7 @@
             ...state,
             screen: screenForReceivedGame(merged),
             currentGameId: incoming.id,
-            games: { ...state.games, [incoming.id]: merged },
+            games: { ...state.games, [incoming.id]: stampGame(merged) },
             handoff: null, pendingContinue: false, revealing: false,
           };
         }
@@ -718,7 +740,7 @@
         case 'SETUP_DONE': {
           const game = newLocalGame(action.p1, action.p2);
           return { ...state, screen: 'word-entry', currentGameId: game.id,
-                   games: { ...state.games, [game.id]: game },
+                   games: { ...state.games, [game.id]: stampGame(game) },
                    handoff: null, pendingContinue: false, revealing: false };
         }
 
@@ -828,11 +850,15 @@
             return withCurrentGame({ ...state, revealing: false, pendingContinue: true },
                                    { over: true, won, results });
           }
-          // Remote 2P: advance to the next player's state and head to the
-          // share screen. The URL we generate is what gets sent to the
-          // opponent, who will pick up exactly where the new state points.
-          return withCurrentGame({ ...state, revealing: false, screen: 'share' },
-                                 advanceRemoteAfterTurn(g, results, won));
+          // Remote 2P: compute the next state then pick a screen. If both
+          // players just finished a round and the eval continues, land on
+          // round-summary so the player sees the scoreboard; tapping Send
+          // moves them to share. Otherwise we go straight to share.
+          const remoteUpdates = advanceRemoteAfterTurn(g, results, won);
+          const candidate = { ...g, ...remoteUpdates };
+          const nextScreen = isRemoteAtRoundSummary(candidate) ? 'round-summary' : 'share';
+          return withCurrentGame({ ...state, revealing: false, screen: nextScreen },
+                                 remoteUpdates);
         }
 
         case 'CONTINUE_FROM_TURN': {
@@ -855,6 +881,24 @@
           }
           return evalRound({ ...state, pendingContinue: false }, g.round);
         }
+
+        case 'REMOTE_ADVANCE_NEXT_ROUND': {
+          // Receiver tapped Continue on the round-summary screen. Advance
+          // the game to "my turn for the next round" and land on the game.
+          const g = getCurrentGame(state);
+          if (!g || g.mode !== 'r' || !isRemoteAtRoundSummary(g)) return state;
+          const nextRound = g.round + 1;
+          return withCurrentGame({ ...state, screen: 'game' }, {
+            round: nextRound, turn: 0,
+            target: g.challengeFor[0][nextRound],
+            guesses: [], scores: [], current: '',
+            over: false, won: false,
+            turnFor: 0,
+          });
+        }
+
+        case 'GOTO_SHARE':
+          return { ...state, screen: 'share' };
 
         case 'NEXT_ROUND_HANDOFF': {
           const g = getCurrentGame(state);
@@ -894,8 +938,9 @@
     // After a remote-mode turn completes, compute the game-state updates
     // that position the URL recipient at exactly the right next step:
     //   - If P1 just played → swap to P2's turn for the same round
-    //   - If P2 just played and round eval says continue → advance to next
-    //     round at P1's turn 0
+    //   - If P2 just played and round eval = continue → leave the state at
+    //     "round just completed" so BOTH players see the round-summary
+    //     scoreboard. The receiver advances to the next round on tap.
     //   - If P2 just played and game should end (asymmetric stump OR last
     //     round) → mark over and record the winning side
     function advanceRemoteAfterTurn(g, results, justWon) {
@@ -921,14 +966,12 @@
           turnFor: 0, turnCounter: counter,
         };
       }
-      // Continue to next round
+      // Continue: keep state at the round-summary handoff. The receiver
+      // taps "Continue to Round N+1" to advance — that's REMOTE_ADVANCE_NEXT_ROUND.
       return {
         results,
-        round: g.round + 1, turn: 0,
-        target: g.challengeFor[0][g.round + 1],
-        guesses: [], scores: [], current: '',
-        over: false, won: false,
-        turnFor: 0, turnCounter: counter,
+        turnFor: 1 - g.turn,
+        turnCounter: counter,
       };
     }
 
@@ -974,6 +1017,8 @@
           // myRole is per-device metadata stored in the wrapper, not in the
           // encoded game (the URL doesn't carry it — each device has its own).
           if (entry.myRole === 0 || entry.myRole === 1) game.myRole = entry.myRole;
+          // Seed sort timestamp from the wrapper's savedAt.
+          game._lastUpdate = entry.savedAt;
           out[gameId] = game;
         }
         if (changed) writeGames(out);
@@ -1148,13 +1193,19 @@
       // Process incoming share URL once auth lands. The hash gets stripped
       // after we read it so a returning user sees their actual local state
       // (active games list etc.) rather than the same old turn re-loading.
+      // If the hash *looked* like a share URL but couldn't be decoded, toast
+      // so the user knows something went wrong (truncated link, etc.).
       useEffect(() => {
         if (!authed) return;
-        const incoming = parseUrlGame();
+        const h = location.hash || '';
+        if (!h.startsWith('#' + URL_PREFIX)) return;
+        const incoming = decodeGame(h.slice(1 + URL_PREFIX.length));
         if (incoming) {
           dispatch({ type: 'LOAD_FROM_URL', game: incoming });
-          clearUrlHash();
+        } else {
+          toast('This link looks broken — ask your friend for a new one.', 3500);
         }
+        clearUrlHash();
       }, [authed]);
 
       const onLogout = useCallback(() => {
@@ -1289,6 +1340,8 @@
       const list = Object.values(state.games)
         // Hide blank/never-played solos (cleaned up on GO_HOME, but defensive).
         .filter(g => !(g.mode === 's' && g.guesses.length === 0 && !g.over))
+        // Most-recently-touched first.
+        .sort((a, b) => (b._lastUpdate || 0) - (a._lastUpdate || 0))
         .map(g => ({ g, d: describeGame(g) }))
         .filter(x => x.d);
       if (list.length === 0) return null;
@@ -1982,6 +2035,33 @@
         ? `Both solved it! Heading to Round ${next}...`
         : `Both stumped! No winner yet — Round ${next} is next!`;
 
+      // Action button branches by mode:
+      //   local 2P: standard handoff → next player's turn screen
+      //   remote, sender (I just played turn=1): "Send to opponent for next round"
+      //   remote, receiver (URL just arrived): "Continue to next round" → game
+      let action;
+      if (g.mode === 'r') {
+        const me = g.myRole ?? 0;
+        const opp = g.players[1 - me] || 'opponent';
+        const isSender = me === g.turn;
+        if (isSender) {
+          action = html`<button class="btn btn-g"
+                                onClick=${() => dispatch({ type: 'GOTO_SHARE' })}>
+            Send to ${opp} for Round ${next} →
+          </button>`;
+        } else {
+          action = html`<button class="btn btn-g"
+                                onClick=${() => dispatch({ type: 'REMOTE_ADVANCE_NEXT_ROUND' })}>
+            Play Round ${next} →
+          </button>`;
+        }
+      } else {
+        action = html`<button class="btn btn-g"
+                              onClick=${() => dispatch({ type: 'NEXT_ROUND_HANDOFF', nextRound: completedRoundIdx + 1 })}>
+          Start Round ${next} →
+        </button>`;
+      }
+
       return html`
         <div id="s-round-summary" class="screen">
           <${TopBar} state=${state} dispatch=${dispatch} badge=${`After Round ${completedRoundIdx + 1}`} />
@@ -1993,10 +2073,7 @@
               <span class="tot-item">${tp.players[1]}: <strong>${t1}</strong> guess${t1 !== 1 ? 'es' : ''}</span>
             </div>
             <p class="rs-verdict">${verdict}</p>
-            <button class="btn btn-g"
-                    onClick=${() => dispatch({ type: 'NEXT_ROUND_HANDOFF', nextRound: completedRoundIdx + 1 })}>
-              Start Round ${next} →
-            </button>
+            ${action}
           </div>
         </div>
       `;
