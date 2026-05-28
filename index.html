@@ -552,10 +552,40 @@
         const merged = { ...initialState, ...s };
         merged.game = { ...emptyGame(), ...(s.game || {}), revealing: false };
         merged.ui = { errorTick: 0, errorMsg: '' };
-        return merged;
+        return recoverEndState(merged);
       } catch (e) {
         return null;
       }
+    }
+
+    // If the user reloaded between SUBMIT_GUESS and REVEAL_DONE, the saved
+    // state has the final guess committed (and scored) but `over` is still
+    // false and `pendingContinue` / `soloSummary` aren't set yet — the
+    // animation never finished so REVEAL_DONE never fired. On rehydrate we'd
+    // be stuck on the game screen with no way to advance. Detect that case
+    // and synthesize the same transition REVEAL_DONE would have made.
+    function recoverEndState(state) {
+      if (state.screen !== 'game') return state;
+      const g = state.game;
+      if (g.over || g.guesses.length === 0) return state;
+      const lastScore = g.scores[g.scores.length - 1];
+      const won = !!lastScore && lastScore.every(s => s === 'correct');
+      const lost = !won && g.guesses.length >= ROWS;
+      if (!won && !lost) return state;
+      const game = { ...g, over: true, won };
+      if (state.mode === 'solo') {
+        return {
+          ...state, game,
+          screen: 'solo-summary',
+          soloSummary: { won, word: g.target, guesses: g.guesses.length },
+        };
+      }
+      // 2-player: write the result if it isn't already, show continue overlay
+      const results = state.tp.results.map(r => r.slice());
+      if (!results[state.tp.round][state.tp.turn]) {
+        results[state.tp.round][state.tp.turn] = { solved: won, guesses: g.guesses.length };
+      }
+      return { ...state, game, tp: { ...state.tp, results }, pendingContinue: true };
     }
 
     function saveState(s) {
