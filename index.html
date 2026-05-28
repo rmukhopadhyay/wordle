@@ -149,7 +149,6 @@
          color:var(--text);font-size:.85rem;font-weight:700;text-transform:uppercase;cursor:pointer;
          display:flex;align-items:center;justify-content:center;transition:background .15s;letter-spacing:.03em;}
     .key.wide{min-width:65px;font-size:.75rem;}
-    .krow:last-child .key{flex:1;min-width:0;font-size:.8rem;height:46px;}
     .key:active{filter:brightness(.8);}
     .key[data-state="correct"]{background:var(--correct);color:#fff;}
     .key[data-state="present"]{background:var(--present);color:#fff;}
@@ -211,8 +210,7 @@
       .krow { gap: 5px; width: 100%; }
       .key  { min-width: 0; flex: 1; height: 50px;
               font-size: .72rem; padding: 0 2px; letter-spacing: 0; }
-      .key.wide { flex: 1.1; font-size: .6rem; }
-      .krow:last-child .key { flex: 1; height: 44px; font-size: .78rem; }
+      .key.wide { flex: 1.5; min-width: 0; font-size: .6rem; }
       #game-main  { gap: 16px; padding-top: 12px; }
       #game-header { padding: 8px 12px; }
       #game-header h1, .ph h1 { font-size: 1.4rem; }
@@ -242,8 +240,7 @@
     const KEYROWS = [
       ['Q','W','E','R','T','Y','U','I','O','P'],
       ['A','S','D','F','G','H','J','K','L'],
-      ['Z','X','C','V','B','N','M'],
-      ['Enter','⌫'],
+      ['Enter','Z','X','C','V','B','N','M','⌫'],
     ];
 
     // ── Auth ──────────────────────────────────────────────────────────────

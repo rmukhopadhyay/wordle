@@ -171,7 +171,7 @@ The reducer marks `game.revealing = true` when a guess is submitted. The `Game` 
 - `min-height: 100dvh` on `#s-game` to account for Safari browser chrome
 - Tile size uses `clamp(44px, calc((100vw - 52px) / 5), 62px)` — scales on narrow screens
 - Keyboard uses `flex: 1` keys with 2px side padding so keys fill the viewport width
-- Keyboard layout is 4 rows: QWERTYUIOP / ASDFGHJKL / ZXCVBNM / Enter · ⌫ (Enter and ⌫ in their own row)
+- Keyboard layout is 3 rows: QWERTYUIOP / ASDFGHJKL / Enter · ZXCVBNM · ⌫ (action keys are 1.5× a letter key, via `.key.wide`)
 
 ---
 
