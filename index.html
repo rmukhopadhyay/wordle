@@ -123,6 +123,11 @@
     .wrap-eye{position:relative;}
     .word-w-input{font-size:1.3rem;font-weight:700;letter-spacing:.25em;text-transform:uppercase;
                   text-align:center;padding:11px 40px 11px 12px;}
+    /* Mask the entered word via CSS instead of type="password" so browsers
+       don't treat it as a real credential (no save-password prompt, no
+       AutoFill suggestion, no strong-password generator). text-security is
+       widely supported in WebKit/Blink; Firefox added it in 2024. */
+    .word-w-input.masked{-webkit-text-security:disc;text-security:disc;}
     .eye-btn{position:absolute;right:9px;top:50%;transform:translateY(-50%);
              background:none;border:none;color:var(--muted);cursor:pointer;font-size:.95rem;}
     .eye-btn:hover{color:var(--text);}
@@ -1600,8 +1605,9 @@
                 <div class="we-row" key=${i}>
                   <label>Round ${i + 1}</label>
                   <div class="wrap-eye">
-                    <input class="tinput word-w-input" type=${reveal[i] ? 'text' : 'password'} maxlength="5"
-                           placeholder="· · · · ·" autocomplete="off" spellcheck="false"
+                    <input class=${`tinput word-w-input ${reveal[i] ? '' : 'masked'}`} type="text" maxlength="5"
+                           placeholder="· · · · ·" autocomplete="off" autocapitalize="characters"
+                           autocorrect="off" spellcheck="false"
                            ref=${refs[i]} value=${words[i]}
                            onInput=${e => setWord(i, e.target.value)}
                            onKeyDown=${e => onKey(e, i)} />
@@ -1771,8 +1777,9 @@
                 <div class="we-row" key=${i}>
                   <label>Round ${i + 1}</label>
                   <div class="wrap-eye">
-                    <input class="tinput word-w-input" type=${reveal[i] ? 'text' : 'password'} maxlength="5"
-                           placeholder="· · · · ·" autocomplete="off" spellcheck="false"
+                    <input class=${`tinput word-w-input ${reveal[i] ? '' : 'masked'}`} type="text" maxlength="5"
+                           placeholder="· · · · ·" autocomplete="off" autocapitalize="characters"
+                           autocorrect="off" spellcheck="false"
                            ref=${refs[i]} value=${words[i]}
                            onInput=${e => setWord(i, e.target.value)}
                            onKeyDown=${e => onKey(e, i)} />
