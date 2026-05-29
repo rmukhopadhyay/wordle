@@ -1,6 +1,6 @@
 # Twordle
 
-A two-player Wordle clone, playable in any browser — desktop or mobile. Single self-contained HTML file, no build step, no server, deployed via GitHub Pages.
+A Wordle-inspired two-player guessing game, with a solo mode that plays like the original. Playable in any browser — desktop or mobile. Two players can play in person (pass-and-play on one device) or asynchronously by sharing a URL or QR code between devices. Single self-contained HTML file, no build step, no server, deployed via GitHub Pages.
 
 **Live URL:** https://rmukhopadhyay.github.io/twordle  
 **Repo:** https://github.com/rmukhopadhyay/twordle
@@ -9,17 +9,19 @@ A two-player Wordle clone, playable in any browser — desktop or mobile. Single
 
 ## Architecture
 
-Everything lives in `index.html` — HTML, CSS, and a single `<script type="module">` in one file. UI is built with **Preact + HTM**, loaded from `esm.sh` at runtime:
+Everything lives in `index.html` — HTML, CSS, and a single `<script type="module">` in one file. UI is built with **Preact + HTM**, with a couple of small utilities, all loaded from `esm.sh` at runtime:
 
 ```js
 import { h, render } from 'https://esm.sh/preact@10.22.0';
 import { useReducer, useEffect, useState, useRef, useCallback, useMemo } from 'https://esm.sh/preact@10.22.0/hooks';
 import htm from 'https://esm.sh/htm@3.1.1';
+import qrcode from 'https://esm.sh/qrcode-generator@1.4.4';   // QR rendering for share URLs
+import LZString from 'https://esm.sh/lz-string@1.5.0';        // compress game state for URLs
 ```
 
 HTM gives JSX-like syntax via tagged template literals — no build step, no transpiler. Attributes follow HTML conventions (`class`, not `className`).
 
-The file is ~192 KB; ~140 KB of that is the embedded word lists. First load fetches ~10 KB of Preact + HTM from the CDN (then browser-cached).
+The file is ~195 KB; ~140 KB of that is the embedded word lists. First load fetches ~25 KB of Preact + HTM + qrcode + LZ-string from the CDN (then browser-cached).
 
 The state machine lives in a single `useReducer` at the top of the `App` component. Every screen transition is a named action; the reducer is the source of truth. Components are pure functions of `(state, dispatch)`.
 
@@ -51,7 +53,7 @@ Client-side password gate using the Web Crypto API. No server involved.
 - **Storage**: `localStorage` key `_wpa` — shared across all tabs/windows of the same origin
 - **TTL**: 365 days, slid forward on each App mount via `writeAuth()`. An active user effectively never expires; an inactive user is kicked to login after a year.
 - **Auth state** lives outside the reducer (separate `useState` in `App`) so it isn't part of the saved game state
-- **Logout**: Clears both `_wpa` and `_tw_save_v2` from localStorage, dispatches `RESET`
+- **Logout**: `clearAuth()` + `clearSaves()` removes `_wpa`, `_tw_games_v1`, `_tw_meta_v1`, and the legacy `_tw_save_v2` if it's still around. Then dispatches `RESET`.
 
 To change the password, generate a new hash:
 ```python
@@ -69,23 +71,32 @@ Then update `AUTH_HASH` in `index.html`.
 Standard Wordle: 6 attempts, random word from `ANSWERS`. After the game ends, a summary screen shows the word, guess count, and a comment. From there the player can start a new game or return to the home screen.
 
 ### 2-Player ("Twordle")
-Fixed 3-round match. Full flow:
+Fixed 3-round match. Two delivery modes share **identical scoring and win conditions** — they only differ in how the device "passes" between players.
 
-1. **Setup**: Enter player names (Player 1, Player 2)
-2. **Word entry — Player 2**: Enters 3 secret words (one per round) for Player 1 to guess. Words must be in `ANSWERS`. Inputs are masked (password type) with an eye toggle. All 3 must be different.
-3. **Handoff**: Pass device to Player 1
-4. **Word entry — Player 1**: Same, enters 3 words for Player 2
-5. **Handoff**: Pass device to Player 1 to start Round 1
-
-**Each round**: Player 1 guesses → handoff → Player 2 guesses → round evaluated
-
-**Win conditions** (checked after each complete round):
+**Win conditions** (checked after each complete round, same in both modes):
 - If one player solved their word and the other didn't → winner declared immediately, no more rounds
 - If both solved or both stumped → tie that round, continue
 - After all 3 rounds with no asymmetric stumping → compare **total guess counts** (lower wins)
 - Equal total guesses → **tie** (the intended outcome is trash talk and a rematch)
 
 Stumped players count as 6 guesses for the tiebreaker.
+
+#### Pass-and-Play (mode `'l'`)
+
+In-person on one shared device. Each "handoff" is a physical pass.
+
+1. **Setup**: Enter both player names (Player 1, Player 2)
+2. **Word entry — Player 2**: Enters 3 secret words (one per round) for Player 1 to guess. Words must be in `ANSWERS`. Inputs are masked (password type) with an eye toggle. All 3 must be different.
+3. **Handoff**: Pass device to Player 1
+4. **Word entry — Player 1**: Same, enters 3 words for Player 2
+5. **Handoff**: Pass device back to Player 1 to start Round 1
+6. **Each round**: Player 1 guesses → handoff → Player 2 guesses → round evaluated → handoff to Player 1 for next round → …
+
+#### Remote (mode `'r'`)
+
+Asynchronous, one device per player. Every device-handoff in pass-and-play becomes a URL share moment — the initiator and opponent send the same link (with the encoded game state in the URL hash) back and forth via WhatsApp / iMessage / SMS / AirDrop / QR. Each player accumulates their active games on the home screen in an active-games list.
+
+The shared link contains the full game state encoded into the URL hash; on receipt the opponent's app decodes it, drops the entry into their on-disk games dict, and lands them on the right next-step screen (accept-challenge, game, round-summary, or game-over). See "Remote 2-player mode" below for the exact turn sequence and the `advanceRemoteAfterTurn` logic.
 
 ---
 
@@ -95,7 +106,9 @@ The reducer state is **pointer + dict**: one `currentGameId` and a `games` map k
 
 ```js
 {
-  screen: 'home' | 'setup' | 'word-entry' | 'handoff' | 'game' | 'solo-summary' | 'round-summary' | 'game-over',
+  screen: 'home' | 'setup' | 'remote-setup' | 'accept-challenge'
+        | 'word-entry' | 'handoff' | 'share'
+        | 'game' | 'solo-summary' | 'round-summary' | 'game-over',
   currentGameId: null | string,
   games: { [gameId]: Game },
   // transient UI (never persisted, never encoded):
@@ -113,7 +126,9 @@ The reducer state is **pointer + dict**: one `currentGameId` and a `games` map k
   results: [[r,r],[r,r],[r,r]],            // [roundIdx][playerIdx]
   round, turn, wordEntryPhase,
   target, guesses[], scores[][], current, over, won,
-  turnFor, turnCounter,                    // remote-only (Phase 2)
+  turnFor, turnCounter,                    // remote-only
+  myRole,                                  // per-device (0|1); stored in disk wrapper, NOT encoded
+  _lastUpdate,                             // transient: sort key for the active-games list
 }
 ```
 
@@ -177,7 +192,13 @@ Status labels are computed by `describeGame(g)`:
 
 ## Sharing UX
 
-`ShareScreen` feature-detects `navigator.share` (and `navigator.canShare({url, text})` when present). When available it shows a **Share →** primary button that opens the system share sheet; copy-link remains as the secondary fallback. When unavailable (most desktop browsers), only **Copy Link** is shown. Both branches stay reachable via the URL itself, which is rendered as a tappable monospaced box and copies on click too.
+`ShareScreen` offers three ways to hand off the share URL:
+
+1. **Web Share API** — `navigator.share({url, text, title})` opens the system share sheet (iOS/Android, macOS Safari). Feature-detected via `navigator.share` and `navigator.canShare({url, text})`; when available it's the primary green button. When unavailable (most desktop browsers), it's hidden entirely.
+2. **Copy Link** — `navigator.clipboard.writeText(url)` plus a brief "Copied! ✓" state. Always shown. The URL text box is also tap-to-copy.
+3. **QR code** — a "Show QR Code" toggle reveals an inline SVG QR generated by `qrcode-generator`. Single `<path>` with one `M-h-v-h-z` segment per dark module — fast to render, sharp at any size, on a white background so cameras pick it up against any UI theme. Useful for in-person handoff when you don't want to thumb a URL — Bali poolside scenario.
+
+The encoded payload runs through LZ-string before going into the URL hash, which keeps the QR sparse enough to scan reliably even on a phone screen.
 
 ---
 
@@ -190,7 +211,7 @@ Two `localStorage` keys:
 
 State is saved on every reducer change via one `useEffect([state])` that calls `saveState(state)` → `writeGames` + `writeMeta`. Transient screens (`setup`, `word-entry`, `handoff`) fall back to `home` on rehydrate. `revealing` and `ui.errorTick` reset. Saved state is cleared on logout.
 
-A finished game (`solo-summary` / `game-over`) is dropped from the dict when the user leaves it via Menu / Play Again / Change Mode — no UI path leads back into a finished game anyway. Blank solo games (started but never guessed) are also dropped on `GO_HOME`. Other in-progress games stay in the dict and will surface in the active-games list once Phase 2 ships.
+A finished game (`solo-summary` / `game-over`) is dropped from the dict when the user leaves it via Menu / Play Again / Change Mode — no UI path leads back into a finished game anyway. Blank solo games (started but never guessed) are also dropped on `GO_HOME`. Other in-progress games stay in the dict and surface in the active-games list on Home.
 
 Legacy `_tw_save_v2` is migrated once on first boot of this version: its single state is decoded, converted into a new game entry, and the old key is removed.
 
@@ -202,40 +223,47 @@ Handoff `next` is stored as `{type: 'START_TURN', round, player}` (data, not a f
 
 | Component | Renders for screen | Notes |
 |---|---|---|
-| `App` | (root) | Manages auth state separately; loads/persists reducer state |
+| `App` | (root) | Manages auth state separately; loads/persists reducer state; parses incoming share URLs from `location.hash` |
 | `Login` | (auth gate) | SHA-256 check via Web Crypto |
-| `Home` | `home` | Mode selection + logout |
-| `Setup` | `setup` | 2-player name entry |
-| `WordEntry` | `word-entry` | 3 masked inputs, eye toggle per row |
-| `Handoff` | `handoff` | Reads `state.handoff.next` and dispatches it on click |
+| `Home` | `home` | Mode selection + logout + active-games list |
+| `Setup` | `setup` | Pass-and-play name entry |
+| `RemoteSetup` | `remote-setup` | Initiator's first turn: own + opponent names + 3 secret words on one screen → produces challenge URL |
+| `AcceptChallenge` | `accept-challenge` | Opponent's first turn after opening a fresh challenge link: enters 3 words, sends back |
+| `WordEntry` | `word-entry` | 3 masked inputs, eye toggle per row (pass-and-play word entry) |
+| `Handoff` | `handoff` | Reads `state.handoff.next` and dispatches it on click (pass-and-play only) |
+| `ShareScreen` | `share` | URL + QR + Copy Link + (when available) Web Share API. Replaces `Handoff` for remote mode |
 | `Game` | `game` | Board + keyboard. Owns reveal animation timing, dispatches `REVEAL_DONE` |
-| `SoloSummary` | `solo-summary` | Result + word + Play Again / Change Mode |
-| `RoundSummary` | `round-summary` | Scoreboard + next-round handoff trigger |
+| `SoloSummary` | `solo-summary` | Result + word + Play Again / Change Mode + 2-Player CTA |
+| `RoundSummary` | `round-summary` | Scoreboard. Local-2P button advances to handoff; remote-sender button advances to share; remote-receiver button advances to next round |
 | `GameOver` | `game-over` | Stump / guess-total / tie outcome + final scoreboard |
 | `Scoreboard` | (shared) | Used by RoundSummary and GameOver |
 | `TopBar` | (shared) | Unified header on every screen except `login` & `home`. Owns the menu/home button. |
+| `ActiveGames` | (shared, on Home) | List of in-progress games sorted by most recent activity; tap to resume, × to dismiss |
 
 ### TopBar and the menu confirmation rule
 
 `TopBar` props: `state`, `dispatch`, optional `title`, `badge` (chip), `meta` (plain text under title), `right` (action node, e.g. solo's New Game). It renders a `⌂ Menu` button on the left that always goes home — but confirms first if a 2-player match is in progress.
 
-"In progress" = `isInProgressMatch(state)`: `mode === '2player'` AND `tp.players[0] !== ''` AND `screen !== 'game-over'`. That covers word-entry, handoff, game (2P), and round-summary — every screen where bailing out would discard a live match. Setup is in 2P mode but `players[0]` is empty until SETUP_DONE, so it skips the confirm. Game-over and solo-summary skip it because the match (or solo round) is already done.
+"In progress" = `isInProgressMatch(state)`: `getCurrentGame(state)` exists, its `mode` is `'l'` or `'r'`, `players[0]` is set, and `screen !== 'game-over'`. That covers word-entry, accept-challenge, handoff, share, game (2P), and round-summary — every screen where bailing out would discard a live match. Pass-and-play setup is in 2P mode but `players[0]` is empty until SETUP_DONE creates the game, so it skips the confirm. Remote setup never has a current game yet, so it also skips. Game-over and solo-summary skip it because the match (or solo round) is already done.
 
 ---
 
 ## Reveal Animation
 
-The reducer marks `game.revealing = true` when a guess is submitted. The `Game` component watches `guesses.length` and schedules:
+The reducer marks `state.revealing = true` when a guess is submitted. The `Game` component watches `guesses.length` and schedules:
 
 1. Per-tile flips with a 300 ms stagger (CSS `animation-delay` driven by local `revealedCols` counter)
 2. After the full reveal:
    - **Win (solo)**: toast a praise message, then `REVEAL_DONE` after 2.4 s (so the bounce animation can play)
-   - **Win (2-player)**: toast + immediate `REVEAL_DONE` (Continue overlay handles its own 1.8 s delay)
+   - **Win (2-player, both local & remote)**: toast + immediate `REVEAL_DONE`
    - **Loss (solo)**: toast the answer, then `REVEAL_DONE` after 3.6 s
-   - **Loss (2-player)**: toast + immediate `REVEAL_DONE`
+   - **Loss (2-player, both local & remote)**: toast + immediate `REVEAL_DONE`
    - **Mid-game**: `REVEAL_DONE` right after the animation
 
-`REVEAL_DONE` clears `revealing`, sets `over`/`won`, and either transitions to `solo-summary` (solo) or sets `pendingContinue` (2-player).
+`REVEAL_DONE` clears `revealing`, sets `over`/`won`, and routes by mode:
+- **Solo**: transition to `solo-summary`.
+- **Local 2P**: set `pendingContinue` (game screen shows a Continue overlay after a 1.8 s delay).
+- **Remote 2P**: compute the next-player state via `advanceRemoteAfterTurn`, then go to `share` — or to `round-summary` first if both players just finished a round and round eval says continue.
 
 ---
 
@@ -243,7 +271,8 @@ The reducer marks `game.revealing = true` when a guess is submitted. The `Game` 
 
 - Viewport meta includes `user-scalable=no, maximum-scale=1` to prevent double-tap zoom
 - `touch-action: manipulation` on all keys and buttons to kill the 300 ms tap delay
-- `overflow: hidden` + `overscroll-behavior: none` on html/body to prevent scrolling
+- `overflow: hidden` + `overscroll-behavior: none` on html/body — keeps the game screen pinned (no rubber-banding while playing)
+- **Scrollable non-game screens.** Because the body is `overflow: hidden`, every screen whose content can grow taller than the viewport (`#s-setup`, `#s-remote-setup`, `#s-accept-challenge`, `#s-word-entry`, `#s-home`, `#s-share`, `#s-handoff`, `#s-round-summary`, `#s-game-over`, `#s-solo-summary`) gets `height: 100dvh; overflow-y: auto` so it scrolls internally. The inner body containers use `justify-content: safe center` — short content vertically centers, overflowing content pins to flex-start so the top header and bottom action button are both reachable.
 - `min-height: 100dvh` on `#s-game` to account for Safari browser chrome
 - Tile size uses `clamp(44px, calc((100vw - 52px) / 5), 62px)` — scales on narrow screens
 - Keyboard uses `flex: 1` keys with 2px side padding so keys fill the viewport width
