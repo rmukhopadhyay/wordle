@@ -1260,22 +1260,39 @@
         if (authed) writeAuth();
       }, []);
 
-      // Process incoming share URL once auth lands. The hash gets stripped
-      // after we read it so a returning user sees their actual local state
-      // (active games list etc.) rather than the same old turn re-loading.
-      // If the hash *looked* like a share URL but couldn't be decoded, toast
-      // so the user knows something went wrong (truncated link, etc.).
+      // Process incoming share URLs. The hash gets stripped after we read it
+      // so a returning user sees their actual local state (active games list
+      // etc.) rather than the same old turn re-loading. If the hash *looked*
+      // like a share URL but couldn't be decoded, toast so the user knows
+      // something went wrong (truncated link, etc.).
+      //
+      // We don't just run this once on mount: mobile browsers (especially iOS
+      // Safari) often focus an existing tab and update location.hash in place
+      // when the user taps a link, instead of reloading. We need to react to
+      // hashchange so URLs landed in-tab still get parsed. visibilitychange is
+      // a safety net for iOS's tab freezing — a backgrounded tab can have its
+      // hash updated without firing hashchange until something nudges it.
       useEffect(() => {
         if (!authed) return;
-        const h = location.hash || '';
-        if (!h.startsWith('#' + URL_PREFIX)) return;
-        const incoming = decodeGame(h.slice(1 + URL_PREFIX.length));
-        if (incoming) {
-          dispatch({ type: 'LOAD_FROM_URL', game: incoming });
-        } else {
-          toast('This link looks broken — ask your friend for a new one.', 3500);
-        }
-        clearUrlHash();
+        const tryLoad = () => {
+          const h = location.hash || '';
+          if (!h.startsWith('#' + URL_PREFIX)) return;
+          const incoming = decodeGame(h.slice(1 + URL_PREFIX.length));
+          if (incoming) {
+            dispatch({ type: 'LOAD_FROM_URL', game: incoming });
+          } else {
+            toast('This link looks broken — ask your friend for a new one.', 3500);
+          }
+          clearUrlHash();
+        };
+        tryLoad();
+        const onVisibility = () => { if (!document.hidden) tryLoad(); };
+        window.addEventListener('hashchange', tryLoad);
+        document.addEventListener('visibilitychange', onVisibility);
+        return () => {
+          window.removeEventListener('hashchange', tryLoad);
+          document.removeEventListener('visibilitychange', onVisibility);
+        };
       }, [authed]);
 
       const onLogout = useCallback(() => {
