@@ -81,6 +81,13 @@
                 text-decoration:underline;text-underline-offset:3px;margin-top:8px;}
     #logout-btn:hover{color:var(--text);}
 
+    /* Disclaimer footer (login + home). Pushed to the bottom by the flex:1
+       body above it; on screens whose content overflows the viewport it
+       scrolls into view at the end of the scroll. */
+    .disclaimer{font-size:.62rem;color:var(--muted);line-height:1.65;
+                text-align:center;max-width:340px;padding:16px 24px 24px;
+                opacity:.72;}
+
     /* Active games list */
     .active-games{width:100%;max-width:340px;display:flex;flex-direction:column;gap:8px;
                   margin-top:24px;}
@@ -1350,6 +1357,20 @@
       }
     }
 
+    // Small attribution + IP-respect notice shown at the bottom of the
+    // login and home screens. Kept text-only so it can scale freely on tiny
+    // viewports without competing with the action UI.
+    function Disclaimer() {
+      return html`
+        <div class="disclaimer">
+          Inspired by Wordle® by The New York Times Company.
+          Twordle is an independent personal project — not affiliated with,
+          endorsed by, or sponsored by NYT. Made in the spirit of fair use,
+          with respect for the original's intellectual property.
+        </div>
+      `;
+    }
+
     function Login({ onSuccess }) {
       const [pw, setPw] = useState('');
       const [show, setShow] = useState(false);
@@ -1395,6 +1416,7 @@
               ${busy ? '...' : 'Unlock →'}
             </button>
           </div>
+          <${Disclaimer} />
         </div>
       `;
     }
@@ -1410,6 +1432,7 @@
             <${ActiveGames} state=${state} dispatch=${dispatch} />
             <button id="logout-btn" onClick=${onLogout}>Sign out</button>
           </div>
+          <${Disclaimer} />
         </div>
       `;
     }
