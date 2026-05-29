@@ -123,11 +123,19 @@
     .wrap-eye{position:relative;}
     .word-w-input{font-size:1.3rem;font-weight:700;letter-spacing:.25em;text-transform:uppercase;
                   text-align:center;padding:11px 40px 11px 12px;}
-    /* Mask the entered word via CSS instead of type="password" so browsers
-       don't treat it as a real credential (no save-password prompt, no
-       AutoFill suggestion, no strong-password generator). text-security is
-       widely supported in WebKit/Blink; Firefox added it in 2024. */
-    .word-w-input.masked{-webkit-text-security:disc;text-security:disc;}
+    /* Mask the entered word ourselves with a dot-overlay instead of using
+       type="password" (which would trigger password-manager prompts) or
+       -webkit-text-security: disc (which on iOS Safari briefly reveals the
+       last typed character — Apple's "show last char" carry-over from
+       password fields). Hiding the input text via `color: transparent` and
+       rendering dots in an overlay div eliminates both problems while
+       keeping a visible caret so the user can see where they're typing. */
+    .word-w-input.masked{color:transparent;caret-color:var(--text);}
+    .word-input-mask{position:absolute;inset:0;pointer-events:none;
+                     padding:11px 40px 11px 12px;
+                     font-size:1.3rem;font-weight:700;letter-spacing:.25em;
+                     display:flex;align-items:center;justify-content:center;
+                     color:var(--text);}
     .eye-btn{position:absolute;right:9px;top:50%;transform:translateY(-50%);
              background:none;border:none;color:var(--muted);cursor:pointer;font-size:.95rem;}
     .eye-btn:hover{color:var(--text);}
@@ -1611,6 +1619,7 @@
                            ref=${refs[i]} value=${words[i]}
                            onInput=${e => setWord(i, e.target.value)}
                            onKeyDown=${e => onKey(e, i)} />
+                    ${!reveal[i] && words[i] && html`<div class="word-input-mask" aria-hidden="true">${'●'.repeat(words[i].length)}</div>`}
                     <button class="eye-btn" onClick=${() => toggleEye(i)}>${reveal[i] ? '🙈' : '👁'}</button>
                   </div>
                   <div class="we-row-err">${errs[i]}</div>
@@ -1783,6 +1792,7 @@
                            ref=${refs[i]} value=${words[i]}
                            onInput=${e => setWord(i, e.target.value)}
                            onKeyDown=${e => onKey(e, i)} />
+                    ${!reveal[i] && words[i] && html`<div class="word-input-mask" aria-hidden="true">${'●'.repeat(words[i].length)}</div>`}
                     <button class="eye-btn" onClick=${() => toggleEye(i)}>${reveal[i] ? '🙈' : '👁'}</button>
                   </div>
                   <div class="we-row-err">${errs[i]}</div>
