@@ -85,18 +85,19 @@ Stumped players count as 6 guesses for the tiebreaker.
 
 In-person on one shared device. Each "handoff" is a physical pass.
 
-1. **Setup**: Enter both player names (Player 1, Player 2)
-2. **Word entry — Player 2**: Enters 3 secret words (one per round) for Player 1 to guess. Words must be in `ANSWERS`. Inputs are masked (password type) with an eye toggle. All 3 must be different.
-3. **Handoff**: Pass device to Player 1
-4. **Word entry — Player 1**: Same, enters 3 words for Player 2
-5. **Handoff**: Pass device back to Player 1 to start Round 1
-6. **Each round**: Player 1 guesses → handoff → Player 2 guesses → round evaluated → handoff to Player 1 for next round → …
+1. **Setup**: Enter both player names (Player 1 = device-holder/initiator, Player 2 = opponent)
+2. **Mode chooser**: Pick Pass & Play (vs Remote)
+3. **Word entry — Player 1 (initiator)**: Enters 3 secret words for Player 2 to guess. Words must be in `ANSWERS`. Inputs are masked (password type) with an eye toggle. All 3 must be different.
+4. **Handoff**: Pass device to Player 2
+5. **Word entry — Player 2**: Enters 3 words for Player 1
+6. **Handoff**: Pass device back to Player 1 to start Round 1
+7. **Each round**: Player 1 guesses → handoff → Player 2 guesses → round evaluated → handoff to Player 1 for next round → …
 
 #### Remote (mode `'r'`)
 
 Asynchronous, one device per player. Every device-handoff in pass-and-play becomes a URL share moment — the initiator and opponent send the same link (with the encoded game state in the URL hash) back and forth via WhatsApp / iMessage / SMS / AirDrop / QR. Each player accumulates their active games on the home screen in an active-games list.
 
-The shared link contains the full game state encoded into the URL hash; on receipt the opponent's app decodes it, drops the entry into their on-disk games dict, and lands them on the right next-step screen (accept-challenge, game, round-summary, or game-over). See "Remote 2-player mode" below for the exact turn sequence and the `advanceRemoteAfterTurn` logic.
+The entry flow is the same as Pass-and-Play through the mode chooser; picking Remote just switches the placeholder game's `mode` to `'r'` and routes word entry through a share screen instead of an on-device handoff. On receipt the opponent's app decodes the URL, drops the entry into their on-disk games dict, and lands them on the right next-step screen (accept-challenge, game, round-summary, or game-over). See "Remote 2-player mode" below for the exact turn sequence and the `advanceRemoteAfterTurn` logic.
 
 ---
 
@@ -106,7 +107,7 @@ The reducer state is **pointer + dict**: one `currentGameId` and a `games` map k
 
 ```js
 {
-  screen: 'home' | 'setup' | 'remote-setup' | 'accept-challenge'
+  screen: 'home' | 'setup' | 'mode-chooser' | 'accept-challenge'
         | 'word-entry' | 'handoff' | 'share'
         | 'game' | 'solo-summary' | 'round-summary' | 'game-over',
   currentGameId: null | string,
@@ -149,7 +150,7 @@ Components read the active game via `getCurrentGame(state)`; reducer actions mut
 Same per-game shape as local 2P, but each device-handoff is replaced by sharing a URL. URL format: `<base>#r:<encodedGame>`. The hash is read once on App mount (after auth), dispatched as `LOAD_FROM_URL`, then stripped via `history.replaceState`.
 
 Turn order (initiator = P1, plays first):
-1. P1 enters their name, opponent name, and 3 secret words → `REMOTE_SETUP_DONE` → ShareScreen
+1. P1 enters both names → ModeChooser → picks Remote → WordEntry → enters 3 secret words for P2 → `WORD_ENTRY_DONE` for mode `'r'` → ShareScreen
 2. P2 opens link → AcceptChallenge → enters their 3 words → `REMOTE_ACCEPT_DONE` → ShareScreen (sends back)
 3. P1 opens link → game R1 → plays → `REVEAL_DONE` advances state for P2 → ShareScreen
 4. P2 opens link → game R1 → plays → both rounds done, eval determines next → ShareScreen
@@ -226,8 +227,8 @@ Handoff `next` is stored as `{type: 'START_TURN', round, player}` (data, not a f
 | `App` | (root) | Manages auth state separately; loads/persists reducer state; parses incoming share URLs from `location.hash` |
 | `Login` | (auth gate) | SHA-256 check via Web Crypto |
 | `Home` | `home` | Mode selection + logout + active-games list |
-| `Setup` | `setup` | Pass-and-play name entry |
-| `RemoteSetup` | `remote-setup` | Initiator's first turn: own + opponent names + 3 secret words on one screen → produces challenge URL |
+| `Setup` | `setup` | 2-player name entry (step 1 of unified 2P entry flow) |
+| `ModeChooser` | `mode-chooser` | Step 2 of 2P entry: pick Pass & Play vs Remote |
 | `AcceptChallenge` | `accept-challenge` | Opponent's first turn after opening a fresh challenge link: enters 3 words, sends back |
 | `WordEntry` | `word-entry` | 3 masked inputs, eye toggle per row (pass-and-play word entry) |
 | `Handoff` | `handoff` | Reads `state.handoff.next` and dispatches it on click (pass-and-play only) |

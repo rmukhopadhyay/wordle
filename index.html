@@ -149,8 +149,10 @@
                touch-action:manipulation;}
     .qr-toggle:hover{color:var(--text);}
 
-    /* Remote setup screen reuses setup-body + we-* styles */
-    #s-remote-setup,#s-accept-challenge{min-height:100vh;}
+    /* Setup / accept-challenge / mode-chooser reuse setup-body + we-* styles */
+    #s-accept-challenge,#s-mode-chooser{min-height:100vh;}
+    .mc-hint{font-size:.78rem;color:var(--muted);line-height:1.5;
+             max-width:300px;margin-top:-6px;text-align:center;}
 
     /* Screens whose content can grow taller than the viewport. The body has
        overflow:hidden (to lock the game screen in place), so each of these
@@ -159,7 +161,7 @@
        content overflows, so the header is always visible AND any bottom-of-
        screen action button (Done, Continue, Play Again, etc.) is reachable
        via scroll. */
-    #s-setup,#s-remote-setup,#s-accept-challenge,#s-word-entry,#s-home,
+    #s-setup,#s-mode-chooser,#s-accept-challenge,#s-word-entry,#s-home,
     #s-share,#s-handoff,#s-round-summary,#s-game-over,#s-solo-summary{
       height:100dvh;overflow-y:auto;-webkit-overflow-scrolling:touch;
     }
@@ -457,23 +459,6 @@
       return emptyGame({ id: randomGameId(), mode: 'l', players: [p1, p2] });
     }
 
-    function newRemoteGame(p1Name, p2Name, p1WordsForP2) {
-      // Initiator (P1) is creating the game and has just entered their 3
-      // words for P2 to guess. Opponent (P2) is up next: they need to enter
-      // their words for P1 to guess before any rounds can be played.
-      const cf = [[], p1WordsForP2.slice()];
-      return emptyGame({
-        id: randomGameId(),
-        mode: 'r',
-        players: [p1Name, p2Name],
-        challengeFor: cf,
-        wordEntryPhase: 1,
-        turnFor: 1,        // opponent receives the share URL
-        turnCounter: 1,    // first turn of the match
-        myRole: 0,         // I created this game, so I'm P1
-      });
-    }
-
     // Where should a freshly-loaded URL game land the receiver?
     // We assume the receiver IS the next player (turnFor) — Phase 2 punts on
     // divergence detection (older-link / wrong-recipient handling).
@@ -519,6 +504,29 @@
     }
 
     function stampGame(game) { return { ...game, _lastUpdate: Date.now() }; }
+
+    // Drop the current game from the dict if it's a "leaving leftover" —
+    // finished (game-over / solo-summary), a blank solo that was never played,
+    // or a 2P placeholder where no words have been entered yet. Used by
+    // transitions that walk away from the current pointer without resuming it
+    // (PICK_SOLO from solo summary, PICK_TWO_PLAYER from the CTA, GO_HOME
+    // from mode-chooser, etc.) so abandoned games don't linger in the
+    // active-games list.
+    function dropLeavingCurrent(state) {
+      const games = { ...state.games };
+      const cur = getCurrentGame(state);
+      if (cur) {
+        const finished = cur.over
+          || state.screen === 'solo-summary'
+          || state.screen === 'game-over';
+        const blankSolo = cur.mode === 's' && cur.guesses.length === 0 && !cur.over;
+        const blankSetup = (cur.mode === 'l' || cur.mode === 'r')
+          && (cur.challengeFor[0]?.length ?? 0) === 0
+          && (cur.challengeFor[1]?.length ?? 0) === 0;
+        if (finished || blankSolo || blankSetup) delete games[cur.id];
+      }
+      return games;
+    }
 
     // ── Game encoding (shared between URL hash and on-disk dict) ──────────
     // Compact JSON with short keys + single-char score codes, then run
@@ -644,8 +652,9 @@
 
         case 'PICK_SOLO': {
           const game = newSoloGame();
+          const games = dropLeavingCurrent(state);
           return { ...state, screen: 'game', currentGameId: game.id,
-                   games: { ...state.games, [game.id]: stampGame(game) },
+                   games: { ...games, [game.id]: stampGame(game) },
                    handoff: null, pendingContinue: false, revealing: false };
         }
 
@@ -661,24 +670,9 @@
         }
 
         case 'PICK_TWO_PLAYER':
-          return { ...state, screen: 'setup' };
-
-        case 'PICK_REMOTE':
-          return { ...state, screen: 'remote-setup' };
-
-        case 'REMOTE_SETUP_DONE': {
-          // Initiator (P1) finished entering their name, opponent name, and
-          // 3 secret words for opponent. Game is created; opponent's setup
-          // is next, so the share URL is for them.
-          const game = newRemoteGame(action.p1, action.p2, action.words);
-          return {
-            ...state,
-            screen: 'share',
-            currentGameId: game.id,
-            games: { ...state.games, [game.id]: stampGame(game) },
-            handoff: null, pendingContinue: false, revealing: false,
-          };
-        }
+          return { ...state, screen: 'setup',
+                   games: dropLeavingCurrent(state),
+                   currentGameId: null };
 
         case 'REMOTE_ACCEPT_DONE': {
           // Opponent (P2) just entered their 3 words. Both players' words are
@@ -709,10 +703,22 @@
           let screen = 'game';
           if (game.over) {
             screen = game.mode === 's' ? 'solo-summary' : 'game-over';
+          } else if (game.mode === 'l') {
+            // Local 2P. If either player's words aren't entered yet, resume
+            // at the word-entry step (placeholders from mode-chooser bail-out
+            // would otherwise route to a broken game screen).
+            if (game.challengeFor[0].length === 0 || game.challengeFor[1].length === 0) {
+              screen = 'word-entry';
+            } else {
+              screen = 'game';
+            }
           } else if (game.mode === 'r') {
             const myRole = game.myRole;
             if (game.challengeFor[0].length === 0 && myRole === 1) {
               screen = 'accept-challenge';
+            } else if (game.challengeFor[1].length === 0 && myRole === 0) {
+              // Initiator's setup never finished — resume at their word entry.
+              screen = 'word-entry';
             } else if (isRemoteAtRoundSummary(game)) {
               screen = 'round-summary';
             } else if (game.turnFor === myRole) {
@@ -760,52 +766,76 @@
           };
         }
 
-        case 'GO_HOME': {
-          // Keep the games dict (so non-current games survive), but drop the
-          // pointer + all transient UI. The current game is also dropped if
-          // there's nothing meaningful to resume:
-          //   - blank solo (started but never guessed)
-          //   - finished game (we're on solo-summary or game-over)
-          //     — no UI path leads back into a finished game anyway.
-          const games = { ...state.games };
-          const cur = getCurrentGame(state);
-          if (cur) {
-            const finished = state.screen === 'solo-summary' || state.screen === 'game-over';
-            const blankSolo = cur.mode === 's' && cur.guesses.length === 0 && !cur.over;
-            if (finished || blankSolo) delete games[cur.id];
-          }
-          return { ...initialState, games };
-        }
+        case 'GO_HOME':
+          // Drop the current pointer + transient UI; drop the current game
+          // entirely if it's a leaving leftover (finished, blank solo,
+          // or blank 2P setup placeholder).
+          return { ...initialState, games: dropLeavingCurrent(state) };
 
         case 'SETUP_DONE': {
+          // Names submitted. Create the game with mode='l' as a placeholder;
+          // the mode-chooser screen commits the actual mode next. wordEntryPhase
+          // starts at 0 = initiator (P1) sets their words for P2 first.
           const game = newLocalGame(action.p1, action.p2);
-          return { ...state, screen: 'word-entry', currentGameId: game.id,
+          return { ...state, screen: 'mode-chooser', currentGameId: game.id,
                    games: { ...state.games, [game.id]: stampGame(game) },
                    handoff: null, pendingContinue: false, revealing: false };
+        }
+
+        case 'PICK_PASS_AND_PLAY':
+          // Mode is already 'l' from SETUP_DONE — just continue to word entry.
+          return { ...state, screen: 'word-entry' };
+
+        case 'PICK_REMOTE_VARIANT': {
+          // Switch the placeholder game to remote mode; initiator is P1 (role 0),
+          // opponent receives the URL after P1's words are entered.
+          const g = getCurrentGame(state);
+          if (!g) return state;
+          return withCurrentGame({ ...state, screen: 'word-entry' }, {
+            mode: 'r', myRole: 0,
+            turnFor: 1, turnCounter: 1,
+          });
         }
 
         case 'WORD_ENTRY_DONE': {
           const g = getCurrentGame(state);
           if (!g) return state;
-          // phase 0: P2 (setterIdx=1) sets words for P1 (guesserIdx=0)
-          // phase 1: P1 (setterIdx=0) sets words for P2 (guesserIdx=1)
+          // New phase semantics:
+          //   phase 0 = initiator (P1) sets words for P2 → challengeFor[1]
+          //   phase 1 = opponent  (P2) sets words for P1 → challengeFor[0]
+          // (Inverted from the old numbering, which had P2 going first in
+          // pass-and-play. Both modes now have the initiator set up first.)
           const phase = g.wordEntryPhase;
-          const guesserIdx = phase === 0 ? 0 : 1;
+          const guesserIdx = 1 - phase;
           const challengeFor = g.challengeFor.map(arr => arr.slice());
           challengeFor[guesserIdx] = action.words;
+
           if (phase === 0) {
+            // P1 just finished. Where to next depends on mode.
+            if (g.mode === 'r') {
+              // Remote: opponent will enter their words on their own device
+              // after they open the share URL.
+              return withCurrentGame({ ...state, screen: 'share' }, {
+                challengeFor, wordEntryPhase: 1,
+                turnFor: 1, turnCounter: (g.turnCounter || 1),
+              });
+            }
+            // Local 2P: hand the device to P2 for their word entry.
             return withCurrentGame({
               ...state, screen: 'handoff',
               handoff: {
-                badge: `${g.players[0]}'s setup`,
+                badge: `${g.players[1]}'s setup`,
                 icon: '🔒',
                 title: 'Words locked in!',
-                desc: `Now hand the device to <strong>${g.players[0]}</strong> to enter their words.`,
+                desc: `Now hand the device to <strong>${g.players[1]}</strong> to enter their words.`,
                 btnText: 'Enter My Words →',
                 next: { type: 'GO_WORD_ENTRY' },
               },
             }, { challengeFor, wordEntryPhase: 1 });
           }
+          // phase === 1: P2 just finished. Both done → hand back to P1 for R1.
+          // (Local 2P path only — in remote, P2's word entry happens via
+          // AcceptChallenge → REMOTE_ACCEPT_DONE.)
           return withCurrentGame({
             ...state, screen: 'handoff',
             handoff: {
@@ -1036,7 +1066,7 @@
     // Each game ages out independently via SAVE_TTL_MS; the meta entry uses
     // the same TTL so a stale pointer to an expired game doesn't linger.
 
-    const TRANSIENT_SCREENS = new Set(['setup', 'word-entry', 'handoff']);
+    const TRANSIENT_SCREENS = new Set(['setup', 'mode-chooser', 'word-entry', 'handoff']);
 
     function loadGames() {
       try {
@@ -1260,7 +1290,7 @@
       switch (state.screen) {
         case 'home':              return html`<${Home} state=${state} dispatch=${dispatch} onLogout=${onLogout} />`;
         case 'setup':             return html`<${Setup} state=${state} dispatch=${dispatch} />`;
-        case 'remote-setup':      return html`<${RemoteSetup} state=${state} dispatch=${dispatch} />`;
+        case 'mode-chooser':      return html`<${ModeChooser} state=${state} dispatch=${dispatch} />`;
         case 'accept-challenge':  return html`<${AcceptChallenge} state=${state} dispatch=${dispatch} />`;
         case 'word-entry':        return html`<${WordEntry} state=${state} dispatch=${dispatch} />`;
         case 'handoff':           return html`<${Handoff} state=${state} dispatch=${dispatch} />`;
@@ -1327,12 +1357,35 @@
         <div id="s-home" class="screen">
           <div class="home-body">
             <div class="logo">TWORDLE</div>
-            <div class="sub">Play remotely with a friend — or pass-and-play in person</div>
-            <button class="btn btn-g" onClick=${() => dispatch({ type: 'PICK_REMOTE' })}>⚔ Play Remotely</button>
-            <button class="btn btn-o" onClick=${() => dispatch({ type: 'PICK_TWO_PLAYER' })}>⚔ Pass & Play</button>
+            <div class="sub">Play with a friend — across the room or across the world</div>
+            <button class="btn btn-g" onClick=${() => dispatch({ type: 'PICK_TWO_PLAYER' })}>⚔ 2 Player</button>
             <button class="btn btn-o" onClick=${() => dispatch({ type: 'PICK_SOLO' })}>Solo Play</button>
             <${ActiveGames} state=${state} dispatch=${dispatch} />
             <button id="logout-btn" onClick=${onLogout}>Sign out</button>
+          </div>
+        </div>
+      `;
+    }
+
+    // Step 2 of the 2P setup flow. Names are already in the placeholder game;
+    // here the user decides whether to play on one device or across two.
+    function ModeChooser({ state, dispatch }) {
+      const g = getCurrentGame(state);
+      const opp = g?.players[1] || 'your friend';
+      return html`
+        <div id="s-mode-chooser" class="screen">
+          <${TopBar} state=${state} dispatch=${dispatch} title="2 Player" />
+          <div class="setup-body">
+            <h2>How are you playing?</h2>
+            <p class="we-prompt">Pick how you'll exchange turns with <strong>${opp}</strong>.</p>
+            <button class="btn btn-g" onClick=${() => dispatch({ type: 'PICK_REMOTE_VARIANT' })}>
+              ⚔ Remote
+            </button>
+            <div class="mc-hint">Different devices. You'll share a link or QR code after each turn.</div>
+            <button class="btn btn-o" onClick=${() => dispatch({ type: 'PICK_PASS_AND_PLAY' })}>
+              ⚔ Pass & Play
+            </button>
+            <div class="mc-hint">Same device. You'll hand the phone back and forth.</div>
           </div>
         </div>
       `;
@@ -1378,8 +1431,15 @@
 
     function ActiveGames({ state, dispatch }) {
       const list = Object.values(state.games)
-        // Hide blank/never-played solos (cleaned up on GO_HOME, but defensive).
-        .filter(g => !(g.mode === 's' && g.guesses.length === 0 && !g.over))
+        // Hide leftovers: blank solos and 2P placeholders where no words were
+        // entered (cleaned up on GO_HOME, but defensive against tab-close).
+        .filter(g => {
+          if (g.mode === 's' && g.guesses.length === 0 && !g.over) return false;
+          if ((g.mode === 'l' || g.mode === 'r')
+              && (g.challengeFor[0]?.length ?? 0) === 0
+              && (g.challengeFor[1]?.length ?? 0) === 0) return false;
+          return true;
+        })
         // Most-recently-touched first.
         .sort((a, b) => (b._lastUpdate || 0) - (a._lastUpdate || 0))
         .map(g => ({ g, d: describeGame(g) }))
@@ -1447,80 +1507,6 @@
     // Initiator's first turn in a remote match: enter both names and the 3
     // secret words for the opponent in one screen. On submit, the game is
     // created and we transition to the share screen.
-    function RemoteSetup({ state, dispatch }) {
-      const [p1, setP1] = useState('');
-      const [p2, setP2] = useState('');
-      const [words, setWords] = useState(['', '', '']);
-      const [reveal, setReveal] = useState([false, false, false]);
-      const [errs, setErrs] = useState(['', '', '']);
-      const [err, setErr] = useState('');
-      const p1Ref = useRef(null);
-      const wordRefs = [useRef(null), useRef(null), useRef(null)];
-
-      useEffect(() => { setTimeout(() => p1Ref.current?.focus(), 250); }, []);
-
-      const setWord = (i, v) => {
-        const cleaned = v.replace(/[^a-zA-Z]/g, '');
-        setWords(prev => { const w = prev.slice(); w[i] = cleaned; return w; });
-        setErrs(prev => { const e = prev.slice(); e[i] = ''; return e; });
-        setErr('');
-      };
-      const toggleEye = i => setReveal(prev => { const r = prev.slice(); r[i] = !r[i]; return r; });
-
-      const submit = () => {
-        const a = p1.trim(), b = p2.trim();
-        if (!a || !b) return setErr('Enter both names.');
-        if (a.toLowerCase() === b.toLowerCase()) return setErr('Players need different names!');
-        let ok = true;
-        const newErrs = ['', '', ''];
-        const upper = [];
-        for (let i = 0; i < TOTAL_ROUNDS; i++) {
-          const raw = words[i].trim().toLowerCase();
-          if (raw.length !== 5) { newErrs[i] = 'Must be exactly 5 letters.'; ok = false; }
-          else if (!ANSWERS_SET.has(raw)) {
-            newErrs[i] = `"${raw.toUpperCase()}" isn't valid — try a more common word.`; ok = false;
-          } else upper.push(raw.toUpperCase());
-        }
-        setErrs(newErrs);
-        if (!ok) return;
-        if (new Set(upper).size < upper.length) return setErr('Each round needs a different word!');
-        dispatch({ type: 'REMOTE_SETUP_DONE', p1: a, p2: b, words: upper });
-      };
-
-      return html`
-        <div id="s-remote-setup" class="screen">
-          <${TopBar} state=${state} dispatch=${dispatch} title="Play Remotely" />
-          <div class="setup-body">
-            <p class="we-prompt">Enter your name and your opponent's. Then choose 3 secret words for them to guess — one per round.</p>
-            <div class="field"><label>Your name</label>
-              <input class="tinput" type="text" placeholder="e.g. Alice" maxlength="16"
-                     ref=${p1Ref} value=${p1} onInput=${e => { setP1(e.target.value); setErr(''); }} /></div>
-            <div class="field"><label>Opponent's name</label>
-              <input class="tinput" type="text" placeholder="e.g. Bob" maxlength="16"
-                     value=${p2} onInput=${e => { setP2(e.target.value); setErr(''); }} /></div>
-            <div class="we-fields">
-              ${[0,1,2].map(i => html`
-                <div class="we-row" key=${i}>
-                  <label>Round ${i + 1}</label>
-                  <div class="wrap-eye">
-                    <input class="tinput word-w-input" type=${reveal[i] ? 'text' : 'password'} maxlength="5"
-                           placeholder="· · · · ·" autocomplete="off" spellcheck="false"
-                           ref=${wordRefs[i]} value=${words[i]}
-                           onInput=${e => setWord(i, e.target.value)}
-                           onKeyDown=${e => { if (e.key === 'Enter' && i < 2) wordRefs[i+1].current?.focus(); else if (e.key === 'Enter') submit(); }} />
-                    <button class="eye-btn" onClick=${() => toggleEye(i)}>${reveal[i] ? '🙈' : '👁'}</button>
-                  </div>
-                  <div class="we-row-err">${errs[i]}</div>
-                </div>
-              `)}
-            </div>
-            <div class="err">${err}</div>
-            <button class="btn btn-g" onClick=${submit}>Generate Challenge →</button>
-          </div>
-        </div>
-      `;
-    }
-
     // Opponent's first turn: just received an invite URL. The game already
     // contains the initiator's name + their 3 words for us. We enter our
     // 3 words for them, then transition to share back.
@@ -1679,9 +1665,12 @@
 
     function WordEntry({ state, dispatch }) {
       const g = getCurrentGame(state);
+      // New phase semantics: phase = which player is currently setting up.
+      //   0 → P1 (initiator), 1 → P2 (opponent).
+      // Setter is that player; their words are FOR the OTHER player to guess.
       const phase = g?.wordEntryPhase ?? 0;
-      const setterIdx  = phase === 0 ? 1 : 0;
-      const guesserIdx = phase === 0 ? 0 : 1;
+      const setterIdx  = phase;
+      const guesserIdx = 1 - phase;
       const setter  = g?.players[setterIdx] ?? '';
       const guesser = g?.players[guesserIdx] ?? '';
 
@@ -1818,9 +1807,7 @@
             setBouncing(true);
             timers.push(setTimeout(() => setBouncing(false), 800));
             const lastIdx = guesses.length - 1;
-            const soloMsgs = ['Warmed up already!','Limber!','Nicely warm!','Hit your stride!','Long warmup!','Phew!'];
-            const duelMsgs = ['Genius!','Magnificent!','Impressive!','Splendid!','Great!','Phew!'];
-            const msgs = mode === 's' ? soloMsgs : duelMsgs;
+            const msgs = ['Genius!','Magnificent!','Impressive!','Splendid!','Great!','Phew!'];
             timers.push(setTimeout(() => toast(msgs[Math.min(lastIdx, msgs.length - 1)], 2200), 400));
             if (mode === 's') {
               timers.push(setTimeout(() => dispatch({ type: 'REVEAL_DONE' }), 2400));
@@ -2013,11 +2000,11 @@
       const word = g.target;
       const guesses = g.guesses.length;
       const sub = won
-        ? (guesses === 1 ? 'You came ready.'
-           : guesses <= 3 ? 'Nicely limbered up.'
-           : guesses <= 5 ? 'A good stretch.'
-           : 'Phew — long warmup.')
-        : "Brain's not warm yet — that one was tricky.";
+        ? (guesses === 1 ? 'A hole-in-one. Legendary.'
+           : guesses <= 3 ? 'Impressive — well ahead of average.'
+           : guesses <= 5 ? 'Solid solve!'
+           : 'Got there in the end!')
+        : 'Better luck next time — that one was tricky.';
       return html`
         <div id="s-solo-summary" class="screen">
           <${TopBar} state=${state} dispatch=${dispatch} />
