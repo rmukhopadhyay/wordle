@@ -234,6 +234,11 @@
     .go-wname{color:var(--correct);}
     .go-sub{color:var(--muted);font-size:.85rem;line-height:1.6;}
     .go-detail{width:100%;max-width:320px;}
+    .go-share{display:flex;flex-direction:column;align-items:center;gap:14px;
+              width:100%;max-width:340px;padding-top:8px;
+              border-top:1px solid var(--border);margin-top:6px;}
+    .go-share-prompt{color:var(--muted);font-size:.9rem;line-height:1.6;text-align:center;}
+    .go-share-prompt strong{color:var(--text);}
 
     /* Solo Summary */
     #s-solo-summary{min-height:100vh;justify-content:center;}
@@ -506,24 +511,28 @@
     function stampGame(game) { return { ...game, _lastUpdate: Date.now() }; }
 
     // Drop the current game from the dict if it's a "leaving leftover" —
-    // finished (game-over / solo-summary), a blank solo that was never played,
-    // or a 2P placeholder where no words have been entered yet. Used by
-    // transitions that walk away from the current pointer without resuming it
-    // (PICK_SOLO from solo summary, PICK_TWO_PLAYER from the CTA, GO_HOME
-    // from mode-chooser, etc.) so abandoned games don't linger in the
-    // active-games list.
+    // finished local match / solo, a blank solo that was never played, or a
+    // 2P placeholder where no words have been entered yet.
+    //
+    // Finished REMOTE games are KEPT when the sender hasn't shared the final
+    // result yet (turnFor !== myRole means the URL is still pointed at the
+    // other player). The active-games entry lets them re-open and re-share
+    // later. Finished remote receivers are dropped — they've already seen the
+    // result and there's nothing more for them to do.
     function dropLeavingCurrent(state) {
       const games = { ...state.games };
       const cur = getCurrentGame(state);
-      if (cur) {
-        const finished = cur.over
-          || state.screen === 'solo-summary'
-          || state.screen === 'game-over';
-        const blankSolo = cur.mode === 's' && cur.guesses.length === 0 && !cur.over;
-        const blankSetup = (cur.mode === 'l' || cur.mode === 'r')
-          && (cur.challengeFor[0]?.length ?? 0) === 0
-          && (cur.challengeFor[1]?.length ?? 0) === 0;
-        if (finished || blankSolo || blankSetup) delete games[cur.id];
+      if (!cur) return games;
+      const finishedLocal = cur.over && (cur.mode === 's' || cur.mode === 'l');
+      const finishedRemoteReceiver = cur.over && cur.mode === 'r'
+        && cur.turnFor !== undefined && cur.myRole !== undefined
+        && cur.turnFor === cur.myRole;
+      const blankSolo = cur.mode === 's' && cur.guesses.length === 0 && !cur.over;
+      const blankSetup = (cur.mode === 'l' || cur.mode === 'r')
+        && (cur.challengeFor[0]?.length ?? 0) === 0
+        && (cur.challengeFor[1]?.length ?? 0) === 0;
+      if (finishedLocal || finishedRemoteReceiver || blankSolo || blankSetup) {
+        delete games[cur.id];
       }
       return games;
     }
@@ -920,13 +929,16 @@
             return withCurrentGame({ ...state, revealing: false, pendingContinue: true },
                                    { over: true, won, results });
           }
-          // Remote 2P: compute the next state then pick a screen. If both
-          // players just finished a round and the eval continues, land on
-          // round-summary so the player sees the scoreboard; tapping Send
-          // moves them to share. Otherwise we go straight to share.
+          // Remote 2P: compute the next state then pick a screen.
+          //   - Game over → land on game-over (the share affordance lives there
+          //     now, so the player sees the result AND the prompt to send it).
+          //   - Round eval = continue → round-summary (scoreboard).
+          //   - Otherwise → share (mid-match URL hand-off).
           const remoteUpdates = advanceRemoteAfterTurn(g, results, won);
           const candidate = { ...g, ...remoteUpdates };
-          const nextScreen = isRemoteAtRoundSummary(candidate) ? 'round-summary' : 'share';
+          const nextScreen = candidate.over
+            ? 'game-over'
+            : (isRemoteAtRoundSummary(candidate) ? 'round-summary' : 'share');
           return withCurrentGame({ ...state, revealing: false, screen: nextScreen },
                                  remoteUpdates);
         }
@@ -1431,6 +1443,11 @@
       if (g.mode === 'r') {
         const me = g.myRole ?? 0;
         if (g.over) {
+          // Sender hasn't shared the final result yet — they're the URL holder.
+          if (g.turnFor !== undefined && g.turnFor !== me) {
+            return { icon: '🏁', title: `vs ${opp || 'opponent'}`,
+                     status: `Send final result to ${opp || 'them'}`, mine: true };
+          }
           return { icon: '🏁', title: `vs ${opp || 'opponent'}`, status: 'Match over', mine: false };
         }
         if (g.challengeFor[0].length === 0 && me === 1) {
@@ -2146,6 +2163,36 @@
         subHtml = `Both players used ${t0} total guesses across 3 rounds.<br>Time for some trash talk... 😤`;
       }
 
+      // Remote sender = I just played the game-ending move; the encoded URL is
+      // pointed at the opponent so they can see the final result. Embed the
+      // share affordance right in the game-over screen (more prominent than a
+      // separate share screen that can be tapped past without sharing).
+      const isRemoteSender = g.mode === 'r'
+        && g.myRole !== undefined && g.turnFor !== undefined
+        && g.turnFor !== g.myRole;
+      const opponent = g.mode === 'r' ? (g.players[1 - (g.myRole ?? 0)] || 'your opponent') : '';
+
+      const [copied, setCopied] = useState(false);
+      const [showQr, setShowQr] = useState(false);
+      const url = useMemo(() => isRemoteSender ? buildShareUrl(g) : '', [isRemoteSender, g]);
+      const qr = useMemo(() => (isRemoteSender && showQr) ? renderQRPath(url) : null,
+                         [isRemoteSender, showQr, url]);
+
+      const shareText = `The final result from our Twordle match`;
+      const canWebShare = isRemoteSender && typeof navigator !== 'undefined'
+        && typeof navigator.share === 'function'
+        && (!navigator.canShare || navigator.canShare({ url, text: shareText }));
+
+      const copy = async () => {
+        try { await navigator.clipboard.writeText(url); } catch (e) {}
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1800);
+      };
+      const share = async () => {
+        try { await navigator.share({ url, text: shareText, title: 'Twordle' }); }
+        catch (e) { /* canceled / unsupported — fall through to copy */ }
+      };
+
       return html`
         <div id="s-game-over" class="screen">
           <${TopBar} state=${state} dispatch=${dispatch} />
@@ -2156,7 +2203,32 @@
             <div class="go-detail">
               <${Scoreboard} players=${tp.players} results=${tp.results} roundsPlayed=${roundsPlayed} />
             </div>
-            <button class="btn btn-o" onClick=${() => dispatch({ type: 'GO_HOME' })}>Play Again</button>
+            ${isRemoteSender && html`
+              <div class="go-share">
+                <p class="go-share-prompt" dangerouslySetInnerHTML=${{
+                  __html: `📨 Send the final result to <strong>${opponent}</strong> so they can see how it ended.`
+                }}></p>
+                ${showQr && qr && html`
+                  <div class="qr-box">
+                    <svg viewBox=${`0 0 ${qr.size} ${qr.size}`} xmlns="http://www.w3.org/2000/svg">
+                      <rect width=${qr.size} height=${qr.size} fill="white" />
+                      <path d=${qr.d} fill="black" />
+                    </svg>
+                  </div>
+                `}
+                <div class="share-url" onClick=${copy}>${url}</div>
+                ${canWebShare && html`<button class="btn btn-g" onClick=${share}>Share →</button>`}
+                <button class=${`btn ${canWebShare ? 'btn-o' : 'btn-g'}`} onClick=${copy}>
+                  ${copied ? 'Copied! ✓' : 'Copy Link'}
+                </button>
+                <button class="qr-toggle" onClick=${() => setShowQr(s => !s)}>
+                  ${showQr ? 'Hide QR Code' : 'Show QR Code'}
+                </button>
+              </div>
+            `}
+            <button class="btn btn-o" onClick=${() => dispatch({ type: 'GO_HOME' })}>
+              ${isRemoteSender ? 'Done' : 'Play Again'}
+            </button>
           </div>
         </div>
       `;
