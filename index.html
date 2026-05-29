@@ -187,12 +187,25 @@
        screen action button (Done, Continue, Play Again, etc.) is reachable
        via scroll. */
     #s-login,#s-setup,#s-mode-chooser,#s-accept-challenge,#s-word-entry,#s-home,
-    #s-share,#s-handoff,#s-round-summary,#s-game-over,#s-solo-summary{
+    #s-share,#s-handoff,#s-round-summary,#s-game-over,#s-solo-summary,#s-review{
       height:100dvh;overflow-y:auto;-webkit-overflow-scrolling:touch;
     }
-    .login-body,.setup-body,.we-body,.home-body,.ho-body,.rs-body,.go-body,.ss-body{
+    .login-body,.setup-body,.we-body,.home-body,.ho-body,.rs-body,.go-body,.ss-body,.rv-body{
       justify-content:safe center;
     }
+
+    /* Review: opponent's just-played board, shown to the receiver before
+       round-summary / game-over / game.  Uses the same tile colors as the
+       live game board so it reads at a glance. */
+    #s-review{min-height:100vh;}
+    .rv-body{flex:1;display:flex;flex-direction:column;align-items:center;
+             gap:18px;padding:32px 24px;text-align:center;width:100%;}
+    .rv-target{font-size:.7rem;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);}
+    .rv-target strong{color:var(--text);letter-spacing:.25em;font-weight:700;}
+    .rv-board{display:grid;gap:5px;}
+    .rv-row{display:grid;grid-template-columns:repeat(5,var(--tile));gap:5px;}
+    .rv-body h2{font-size:1.4rem;font-weight:700;}
+    .rv-body p{color:var(--muted);line-height:1.6;font-size:.9rem;}
 
     /* Game */
     #s-game{min-height:100vh;}
@@ -478,6 +491,10 @@
       // match. Stored in the disk wrapper, NOT in encodeGame (since each
       // device has its own perspective). Set on game creation/receive.
       myRole: undefined,
+      // The sender's just-played board, attached so the receiver can review
+      // it before moving on. Cleared on REVIEW_DONE. Encoded in the URL so
+      // both sides have the same snapshot. Shape: { p, r, gs, sc, tg }.
+      reviewBoard: undefined,
       ...overrides,
     });
 
@@ -494,6 +511,9 @@
     // divergence detection (older-link / wrong-recipient handling).
     function screenForReceivedGame(g) {
       if (!g) return 'home';
+      // Review-the-opponent's-board takes precedence: when the URL carries a
+      // reviewBoard snapshot, the receiver sees it before whatever comes next.
+      if (g.mode === 'r' && g.reviewBoard) return 'review';
       if (g.over) return 'game-over';
       if (g.mode === 'r' && (!g.challengeFor[0] || g.challengeFor[0].length === 0)) {
         return 'accept-challenge';
@@ -585,6 +605,14 @@
         ov: g.over, wn: g.won,
       };
       if (g.mode === 'r') { packed.for = g.turnFor; packed.tc = g.turnCounter; }
+      if (g.reviewBoard) {
+        packed.rb = {
+          p: g.reviewBoard.p, r: g.reviewBoard.r,
+          gs: g.reviewBoard.gs,
+          sc: g.reviewBoard.sc.map(row => row.map(s => s[0])),
+          tg: g.reviewBoard.tg,
+        };
+      }
       return LZString.compressToEncodedURIComponent(JSON.stringify(packed));
     }
 
@@ -611,6 +639,12 @@
           current: p.cu || '',
           over: !!p.ov, won: !!p.wn,
           turnFor: p.for, turnCounter: p.tc,
+          reviewBoard: p.rb ? {
+            p: p.rb.p, r: p.rb.r,
+            gs: p.rb.gs || [],
+            sc: (p.rb.sc || []).map(row => row.map(c => SCORE[c] || 'absent')),
+            tg: p.rb.tg || '',
+          } : undefined,
         });
       };
       // Try LZ-string (current format)
@@ -735,20 +769,27 @@
           const game = state.games[id];
           if (!game) return state;
           let screen = 'game';
-          if (game.over) {
-            screen = game.mode === 's' ? 'solo-summary' : 'game-over';
+          if (game.mode === 's') {
+            screen = game.over ? 'solo-summary' : 'game';
           } else if (game.mode === 'l') {
             // Local 2P. If either player's words aren't entered yet, resume
             // at the word-entry step (placeholders from mode-chooser bail-out
             // would otherwise route to a broken game screen).
-            if (game.challengeFor[0].length === 0 || game.challengeFor[1].length === 0) {
+            if (game.over) screen = 'game-over';
+            else if (game.challengeFor[0].length === 0 || game.challengeFor[1].length === 0) {
               screen = 'word-entry';
             } else {
               screen = 'game';
             }
           } else if (game.mode === 'r') {
             const myRole = game.myRole;
-            if (game.challengeFor[0].length === 0 && myRole === 1) {
+            // Receiver hasn't reviewed the opponent's board yet — take them
+            // there first regardless of game-over / round-summary state.
+            if (game.reviewBoard && game.turnFor === myRole) {
+              screen = 'review';
+            } else if (game.over) {
+              screen = 'game-over';
+            } else if (game.challengeFor[0].length === 0 && myRole === 1) {
               screen = 'accept-challenge';
             } else if (game.challengeFor[1].length === 0 && myRole === 0) {
               // Initiator's setup never finished — resume at their word entry.
@@ -1007,6 +1048,18 @@
         case 'GOTO_SHARE':
           return { ...state, screen: 'share' };
 
+        case 'REVIEW_DONE': {
+          // Receiver tapped Continue on the review screen. Drop the snapshot
+          // and route to whatever screen would have applied if the URL hadn't
+          // carried a review payload.
+          const g = getCurrentGame(state);
+          if (!g) return state;
+          let next = 'game';
+          if (g.over) next = 'game-over';
+          else if (g.mode === 'r' && isRemoteAtRoundSummary(g)) next = 'round-summary';
+          return withCurrentGame({ ...state, screen: next }, { reviewBoard: undefined });
+        }
+
         case 'NEXT_ROUND_HANDOFF': {
           const g = getCurrentGame(state);
           if (!g) return state;
@@ -1052,6 +1105,14 @@
     //     round) → mark over and record the winning side
     function advanceRemoteAfterTurn(g, results, justWon) {
       const counter = (g.turnCounter || 0) + 1;
+      // Snapshot the just-played board so the receiver can review it before
+      // moving on. Lives until REVIEW_DONE clears it.
+      const reviewBoard = {
+        p: g.turn, r: g.round,
+        gs: g.guesses.slice(),
+        sc: g.scores.map(row => row.slice()),
+        tg: g.target,
+      };
       if (g.turn === 0) {
         return {
           results, turn: 1, round: g.round,
@@ -1059,6 +1120,7 @@
           guesses: [], scores: [], current: '',
           over: false, won: false,
           turnFor: 1, turnCounter: counter,
+          reviewBoard,
         };
       }
       // turn === 1: both players played this round
@@ -1071,6 +1133,7 @@
           results,
           over: true, won: justWon,
           turnFor: 0, turnCounter: counter,
+          reviewBoard,
         };
       }
       // Continue: keep state at the round-summary handoff. The receiver
@@ -1079,6 +1142,7 @@
         results,
         turnFor: 1 - g.turn,
         turnCounter: counter,
+        reviewBoard,
       };
     }
 
@@ -1349,6 +1413,7 @@
         case 'word-entry':        return html`<${WordEntry} state=${state} dispatch=${dispatch} />`;
         case 'handoff':           return html`<${Handoff} state=${state} dispatch=${dispatch} />`;
         case 'share':             return html`<${ShareScreen} state=${state} dispatch=${dispatch} />`;
+        case 'review':            return html`<${ReviewBoard} state=${state} dispatch=${dispatch} />`;
         case 'game':              return html`<${Game} state=${state} dispatch=${dispatch} />`;
         case 'solo-summary':      return html`<${SoloSummary} state=${state} dispatch=${dispatch} />`;
         case 'round-summary':     return html`<${RoundSummary} state=${state} dispatch=${dispatch} />`;
@@ -2122,6 +2187,51 @@
               })}
             </div>
           `)}
+        </div>
+      `;
+    }
+
+    // Shown to the receiver right after they open a share URL with a
+    // reviewBoard payload — lets them see the opponent's actual guesses and
+    // tile colors before moving on to the round-summary / next play / game-over.
+    function ReviewBoard({ state, dispatch }) {
+      const g = getCurrentGame(state) ?? emptyGame();
+      const rb = g.reviewBoard;
+      if (!rb) {
+        // Defensive: navigate home if somehow we landed here without data.
+        return html`<div class="screen"><${TopBar} state=${state} dispatch=${dispatch} />
+          <button class="btn btn-g" onClick=${() => dispatch({ type: 'GO_HOME' })}>Home</button></div>`;
+      }
+      const playerName = g.players[rb.p] || `Player ${rb.p + 1}`;
+      const lastScore = rb.sc[rb.sc.length - 1];
+      const won = !!lastScore && lastScore.every(s => s === 'correct');
+      const guessCount = rb.gs.length;
+      const tries = guessCount === 1 ? 'try' : 'tries';
+
+      return html`
+        <div id="s-review" class="screen">
+          <${TopBar} state=${state} dispatch=${dispatch} badge=${`Round ${rb.r + 1}`} />
+          <div class="rv-body">
+            <div class="rv-target">Your word: <strong>${rb.tg}</strong></div>
+            <div class="rv-board">
+              ${rb.gs.map((guess, ri) => html`
+                <div class="rv-row" key=${ri}>
+                  ${[0,1,2,3,4].map(ci => html`
+                    <div class="tile filled" data-state=${rb.sc[ri][ci]} key=${ci}>${guess[ci]}</div>
+                  `)}
+                </div>
+              `)}
+            </div>
+            <h2>${won ? `${playerName} solved it in ${guessCount}!` : `${playerName} was stumped.`}</h2>
+            <p>
+              ${won
+                ? `Took them ${guessCount} ${tries} to crack the word.`
+                : `They used all 6 guesses without getting it.`}
+            </p>
+            <button class="btn btn-g" onClick=${() => dispatch({ type: 'REVIEW_DONE' })}>
+              Continue →
+            </button>
+          </div>
         </div>
       `;
     }
