@@ -570,12 +570,13 @@
     // finished local match / solo, a blank solo that was never played, or a
     // 2P placeholder where no words have been entered yet.
     //
-    // Finished REMOTE games are KEPT when the sender hasn't shared the final
-    // result yet (turnFor !== myRole means the URL is still pointed at the
-    // other player). The active-games entry lets them re-open and re-share
-    // later. Finished remote receivers are dropped — they've already seen the
-    // result and there's nothing more for them to do.
-    function dropLeavingCurrent(state) {
+    // Finished REMOTE games are KEPT when the sender still needs to hand off the
+    // final result manually — i.e. the relay hasn't delivered it. Pre-relay that
+    // was always (turnFor !== myRole), so the active-games entry let them re-open
+    // and re-share. With the relay on and the result synced (`delivered`), there's
+    // nothing left to do, so the sender's finished game is dropped too. Finished
+    // remote receivers are always dropped — they've already seen the result.
+    function dropLeavingCurrent(state, { delivered = false } = {}) {
       const games = { ...state.games };
       const cur = getCurrentGame(state);
       if (!cur) return games;
@@ -583,11 +584,16 @@
       const finishedRemoteReceiver = cur.over && cur.mode === 'r'
         && cur.turnFor !== undefined && cur.myRole !== undefined
         && cur.turnFor === cur.myRole;
+      const finishedRemoteSenderDelivered = cur.over && cur.mode === 'r'
+        && cur.turnFor !== undefined && cur.myRole !== undefined
+        && cur.turnFor !== cur.myRole
+        && delivered;
       const blankSolo = cur.mode === 's' && cur.guesses.length === 0 && !cur.over;
       const blankSetup = (cur.mode === 'l' || cur.mode === 'r')
         && (cur.challengeFor[0]?.length ?? 0) === 0
         && (cur.challengeFor[1]?.length ?? 0) === 0;
-      if (finishedLocal || finishedRemoteReceiver || blankSolo || blankSetup) {
+      if (finishedLocal || finishedRemoteReceiver || finishedRemoteSenderDelivered
+          || blankSolo || blankSetup) {
         delete games[cur.id];
       }
       return games;
@@ -946,8 +952,9 @@
         case 'GO_HOME':
           // Drop the current pointer + transient UI; drop the current game
           // entirely if it's a leaving leftover (finished, blank solo,
-          // or blank 2P setup placeholder).
-          return { ...initialState, games: dropLeavingCurrent(state) };
+          // or blank 2P setup placeholder). `delivered` (from a synced remote
+          // game-over) also drops the finished sender — nothing left to re-share.
+          return { ...initialState, games: dropLeavingCurrent(state, { delivered: action.delivered }) };
 
         case 'SETUP_DONE': {
           // Names submitted. Create the game with mode='l' as a placeholder;
@@ -2587,7 +2594,8 @@
                                     variant=${relayOn ? 'waiting' : 'invite'} />
               </div>
             `}
-            <button class="btn btn-o" onClick=${() => dispatch({ type: 'GO_HOME' })}>
+            <button class="btn btn-o" onClick=${() => dispatch({ type: 'GO_HOME',
+                      delivered: isRemoteSender && relayOn && syncStatus?.[g.id] === 'synced' })}>
               ${isRemoteSender ? 'Done' : 'Play Again'}
             </button>
           </div>
