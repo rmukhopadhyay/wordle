@@ -1,0 +1,3 @@
+# Wrangler local state/cache — machine-specific, may contain account metadata.
+.wrangler/
+node_modules/
