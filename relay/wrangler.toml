@@ -1,0 +1,20 @@
+# Wrangler config for the Twordle relay Worker.
+#
+# Deploy steps live in relay/README.md. The one value you must fill in is the KV
+# namespace id — you get it from `wrangler kv namespace create GAMES` (see README).
+
+name = "twordle-relay"
+main = "worker.js"
+compatibility_date = "2025-09-01"
+
+# Serve on the workers.dev subdomain, but skip the extra per-version Preview
+# URLs — one fewer public endpoint exposing stored game state. Takes effect on
+# the next `npx wrangler deploy`.
+workers_dev = true
+preview_urls = false
+
+# Created with:  wrangler kv namespace create GAMES
+# Paste the returned `id = "..."` value below, replacing the placeholder.
+[[kv_namespaces]]
+binding = "GAMES"
+id = "cca22db180ae4466842e51af47c5c004"

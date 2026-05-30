@@ -700,6 +700,52 @@
       try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
     }
 
+    // ── Relay sync (optional) ─────────────────────────────────────────────
+    // A tiny Cloudflare Worker (see relay/) store-and-forwards the same encoded
+    // blob the URL hash carries, keyed by game id, so handoffs after the first
+    // contact sync automatically instead of needing a hand-shuttled link.
+    //
+    // It is ALWAYS best-effort: every call swallows its errors, and the manual
+    // share-link / QR flow remains the fallback. Set RELAY_URL to '' to disable
+    // the relay entirely (the app then behaves exactly as it did before).
+    //
+    // The first handoff (P1's challenge → P2) still goes by link/QR, because the
+    // relay can't deliver to a device that has never heard of the game id. Once
+    // P2 opens that first link, both devices know the id and poll the relay, so
+    // every subsequent turn arrives without anyone tapping a link.
+    const RELAY_URL = 'https://twordle-relay.rmukhopadhyay.workers.dev';   // empty string disables the relay
+    const RELAY_POLL_MS = 6000;
+
+    async function relayPut(game) {
+      if (!RELAY_URL || !game || game.mode !== 'r' || game.turnCounter === undefined) return;
+      try {
+        await fetch(RELAY_URL + '/g/' + encodeURIComponent(game.id), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ v: encodeGame(game), tc: game.turnCounter }),
+          keepalive: true,
+        });
+      } catch (e) { /* best-effort — the share link is the fallback */ }
+    }
+
+    async function relayGet(id) {
+      if (!RELAY_URL || !id) return null;
+      try {
+        const res = await fetch(RELAY_URL + '/g/' + encodeURIComponent(id), { method: 'GET' });
+        if (!res.ok) return null;
+        const rec = await res.json();
+        if (!rec || typeof rec.v !== 'string') return null;
+        return decodeGame(rec.v);
+      } catch (e) { return null; }
+    }
+
+    // "I'm waiting on the opponent for this match" — the games we should poll.
+    function isWaitingRemote(g) {
+      return g && g.mode === 'r' && !g.over
+        && g.myRole !== undefined && g.turnFor !== undefined
+        && g.turnFor !== g.myRole;
+    }
+
     // ── Reducer ───────────────────────────────────────────────────────────
 
     const initialState = {
@@ -828,6 +874,15 @@
           const incoming = action.game;
           if (!incoming || !incoming.id) return state;
           const existing = state.games[incoming.id];
+          // Stale-state guard: turnCounter is monotonic per match, so never let
+          // an older (or equal) turn overwrite newer local state. This makes
+          // relay polls idempotent and stops a re-opened old link from
+          // clobbering progress (the gap CLAUDE.md flagged turnCounter for).
+          if (existing && existing.turnCounter !== undefined
+              && incoming.turnCounter !== undefined
+              && incoming.turnCounter <= existing.turnCounter) {
+            return state;
+          }
           const myRole = existing && existing.myRole !== undefined
             ? existing.myRole
             : incoming.turnFor;
@@ -838,6 +893,37 @@
             currentGameId: incoming.id,
             games: { ...state.games, [incoming.id]: stampGame(merged) },
             handoff: null, pendingContinue: false, revealing: false,
+          };
+        }
+
+        case 'RELAY_SYNC': {
+          // A relay poll delivered a newer turn for a game we already know.
+          // Unlike LOAD_FROM_URL (a deliberate link tap, which always
+          // navigates), this is a background pull — only yank the user into the
+          // game if they're already looking at it (e.g. waiting on the share
+          // screen). Otherwise just refresh the dict so the active-games list
+          // flips to "your turn" and they tap in when ready.
+          const incoming = action.game;
+          if (!incoming || !incoming.id) return state;
+          const existing = state.games[incoming.id];
+          if (!existing) return state;   // only sync matches we already have
+          if (existing.turnCounter !== undefined
+              && incoming.turnCounter !== undefined
+              && incoming.turnCounter <= existing.turnCounter) {
+            return state;
+          }
+          const myRole = existing.myRole !== undefined
+            ? existing.myRole
+            : incoming.turnFor;
+          const merged = { ...incoming, myRole };
+          const isCurrent = state.currentGameId === incoming.id;
+          return {
+            ...state,
+            games: { ...state.games, [incoming.id]: stampGame(merged) },
+            ...(isCurrent ? {
+              screen: screenForReceivedGame(merged),
+              handoff: null, pendingContinue: false, revealing: false,
+            } : {}),
           };
         }
 
@@ -1395,6 +1481,62 @@
           document.removeEventListener('visibilitychange', onVisibility);
         };
       }, [authed]);
+
+      // Relay push: whenever we land on a remote handoff screen (the moments we
+      // already show the share UI), push the encoded state so the opponent's
+      // device can pick it up without a hand-shuttled link. Deduped on the exact
+      // encoded blob so we don't re-PUT the same state on incidental re-renders.
+      // Best-effort — failure just leaves the manual share link as the fallback.
+      const lastPushedRef = useRef({});
+      useEffect(() => {
+        if (!authed || !RELAY_URL) return;
+        const g = getCurrentGame(state);
+        if (!g || g.mode !== 'r' || g.myRole === undefined) return;
+        // The three remote-sender handoff screens: mid-round (share), the round
+        // boundary (round-summary), and the final result (game-over). Pushing on
+        // round-summary is what makes the round boundary auto-deliver instead of
+        // forcing the "Send to X for Round N" tap.
+        const isSenderHandoff = g.turnFor !== g.myRole
+          && (state.screen === 'share' || state.screen === 'game-over'
+              || state.screen === 'round-summary');
+        if (!isSenderHandoff) return;
+        const enc = encodeGame(g);
+        if (lastPushedRef.current[g.id] === enc) return;
+        lastPushedRef.current[g.id] = enc;
+        relayPut(g);
+      }, [state, authed]);
+
+      // Relay pull: for any match where we're waiting on the opponent, poll the
+      // relay on an interval (and immediately on focus) and load a turn the
+      // moment it arrives. The LOAD_FROM_URL turnCounter guard makes a no-change
+      // fetch idempotent; we also pre-check the counter to avoid no-op dispatch.
+      useEffect(() => {
+        if (!authed || !RELAY_URL) return;
+        const waiting = Object.values(state.games).filter(isWaitingRemote);
+        if (waiting.length === 0) return;
+        let cancelled = false;
+        const poll = async () => {
+          if (document.hidden) return;
+          for (const g of waiting) {
+            const incoming = await relayGet(g.id);
+            if (cancelled || !incoming || incoming.turnCounter === undefined) continue;
+            const local = state.games[g.id];
+            if (local && local.turnCounter !== undefined
+                && incoming.turnCounter > local.turnCounter) {
+              dispatch({ type: 'RELAY_SYNC', game: incoming });
+            }
+          }
+        };
+        poll();
+        const onVis = () => { if (!document.hidden) poll(); };
+        const interval = setInterval(poll, RELAY_POLL_MS);
+        document.addEventListener('visibilitychange', onVis);
+        return () => {
+          cancelled = true;
+          clearInterval(interval);
+          document.removeEventListener('visibilitychange', onVis);
+        };
+      }, [state, authed]);
 
       const onLogout = useCallback(() => {
         clearAuth();

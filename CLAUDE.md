@@ -1,6 +1,6 @@
 # Twordle
 
-A Wordle-inspired two-player guessing game, with a solo mode that plays like the original. Playable in any browser — desktop or mobile. Two players can play in person (pass-and-play on one device) or asynchronously by sharing a URL or QR code between devices. Single self-contained HTML file, no build step, no server, deployed via GitHub Pages.
+A Wordle-inspired two-player guessing game, with a solo mode that plays like the original. Playable in any browser — desktop or mobile. Two players can play in person (pass-and-play on one device) or remotely on two devices — remote turns sync automatically through a tiny optional web relay (a Cloudflare Worker), with the URL/QR share link kept as both the required first-contact handoff and the offline fallback. The front end is a single self-contained HTML file, no build step, deployed via GitHub Pages; the relay is the only server-side piece and is effectively free.
 
 **Live URL:** https://rmukhopadhyay.github.io/twordle  
 **Repo:** https://github.com/rmukhopadhyay/twordle
@@ -142,7 +142,7 @@ Components read the active game via `getCurrentGame(state)`; reducer actions mut
 
 ## Game encoding
 
-`encodeGame(game) → LZ-string compressed JSON` is the **shared serialization** used both for the URL hash (remote shares) and for each entry in the on-disk games dict. Short keys, single-char score codes (`'a'`/`'p'`/`'c'`). Versioned via `v: 1`. The output of `LZString.compressToEncodedURIComponent` is already URL-component-safe — no separate base64 step needed.
+`encodeGame(game) → LZ-string compressed JSON` is the **shared serialization** used for the URL hash (remote shares), each entry in the on-disk games dict, **and the web-relay payload** — all three carry the identical blob. Short keys, single-char score codes (`'a'`/`'p'`/`'c'`). Versioned via `v: 1`. The output of `LZString.compressToEncodedURIComponent` is already URL-component-safe — no separate base64 step needed.
 
 `decodeGame` dual-decodes: tries the current LZ-string format first, falls back to the legacy plain `base64url(JSON)` format used in earlier versions so URLs and saves from before this commit still work. Typical URL payload sizes: ~217 chars (LZ) vs ~290 chars (legacy base64url) on a fresh challenge — about 25% smaller, with bigger savings on filled-out mid-game states. Real practical win is denser → sparser QR codes that scan better in poor lighting.
 
@@ -173,8 +173,35 @@ After the sender finishes a round turn and shares the URL, the recipient lands o
 
 ### Open work / known gaps (deferred)
 
-- **No "this link is stale" detection.** A receiver opening an older link silently overwrites their state. `turnCounter` is encoded in every URL specifically to make this fixable later — compare incoming vs. local and prompt before overwriting.
-- **No anti-peek for secret words.** A curious opponent can decompress the hash and see upcoming words. Honor-system for friends-and-family use.
+- **Stale-state clobber — now handled.** `LOAD_FROM_URL` and `RELAY_SYNC` both reject an incoming game whose `turnCounter` isn't strictly newer than the local copy, and the relay Worker enforces the same compare-and-set server-side. Re-opening an old link or a redundant relay poll is now an idempotent no-op instead of a clobber. (We silently ignore the stale state rather than showing a "this link is stale" prompt — that UI is still unbuilt, but the data-loss risk is gone.)
+- **No anti-peek for secret words.** A curious opponent can decompress the URL hash — or now fetch the relay by game id — and see upcoming words. Honor-system for friends-and-family use.
+
+## Web relay sync (optional, mode `'r'`)
+
+Remote mode can hand turns off two ways: the original **manual share** (URL hash / QR) and an optional **web relay** that auto-delivers turns so players don't shuttle a link every round. The relay is **best-effort and additive** — if it's unreachable, disabled, or the network is hostile, remote mode silently falls back to exactly the manual-share behavior. Nothing about gameplay blocks on it.
+
+### The Worker (`relay/`)
+
+A tiny Cloudflare Worker + one KV namespace (`GAMES`). It's deliberately dumb — it store-and-forwards the *same* `encodeGame` blob the URL hash carries, keyed by the 6-char game id, and never understands the game:
+
+- `GET /g/:id` → `{ v, tc, savedAt }` (404 if unknown)
+- `PUT /g/:id` → 200 if `tc` (turnCounter) is strictly newer; **409 + the current record** if stale. This compare-and-set is the server-side half of the stale-state guard.
+- KV entries TTL out after 7 days (mirrors the client's `SAVE_TTL_MS`).
+- CORS locked to the Pages origin + `http://localhost:8765` (local dev).
+- Live at `https://twordle-relay.rmukhopadhyay.workers.dev`. Deploy steps (wrangler login → `kv namespace create` → `deploy`) and `curl` smoke tests are in `relay/README.md`. KV namespace id and `workers_dev`/`preview_urls` settings live in `relay/wrangler.toml`.
+
+### Client wiring (all gated behind `RELAY_URL`)
+
+`RELAY_URL` is a const next to the URL-share helpers holding the Worker base URL. Set it to `''` to disable the relay entirely — the app then behaves byte-for-byte as it did pre-relay, so `main` is always safe to ship with the relay off.
+
+- **`relayPut(game)` / `relayGet(id)`** — shuttle the encoded blob; every call swallows its own errors.
+- **Push effect** (`App`): when the current remote game sits on a *sender* handoff screen — `share`, `round-summary`, or `game-over`, with `turnFor !== myRole` — push the encoded state. Deduped on the exact blob so incidental re-renders don't re-PUT. **Pushing on `round-summary` is load-bearing**: it's what makes the round boundary auto-deliver instead of forcing the "Send to X for Round N" tap.
+- **Poll effect** (`App`): for every match where we're waiting on the opponent (`isWaitingRemote(g)`: remote, not over, `turnFor !== myRole`), poll `relayGet` every `RELAY_POLL_MS` (6 s) and immediately on tab focus. A strictly-newer `turnCounter` dispatches `RELAY_SYNC`. The effect no-ops (no interval) when nothing is waiting.
+- **`RELAY_SYNC` action**: the *gentle* counterpart to `LOAD_FROM_URL`. A link tap (`LOAD_FROM_URL`) always navigates; a background poll (`RELAY_SYNC`) only navigates if the user is already looking at that game (`currentGameId === id`) — otherwise it just refreshes the dict so the active-games row flips to "your turn", never yanking the user out of Home. It also requires the game to already exist locally (you can't be synced into a match you've never heard of).
+
+### First contact still goes by link
+
+The relay can't deliver to a device that's never heard of the game id, so **the very first handoff (P1's challenge → P2) still needs the manual share link / QR.** Once P2 opens that first link, both devices know the id and poll, so every subsequent turn arrives automatically. (See "Recent decisions" / the UX rationalization work for making the relay the *primary* path and the link clearly *secondary*.)
 
 ## myRole (per-device perspective)
 
@@ -335,6 +362,14 @@ git add . && git commit -m "description" && git push
 
 Pages redeploys automatically within ~60 seconds.
 
+**The relay deploys separately** and far less often (only when `relay/worker.js` or `relay/wrangler.toml` change), to the owner's Cloudflare account:
+
+```bash
+cd relay && npx wrangler deploy
+```
+
+The two are independent: the front end on Pages points at the Worker via `RELAY_URL`, and the Worker's CORS allowlist names the Pages origin. Pushing `index.html` with `RELAY_URL` set is what turns the relay on for live users.
+
 ---
 
 ## Local development
@@ -345,3 +380,5 @@ Pages redeploys automatically within ~60 seconds.
 python3 -m http.server 8765
 # then open http://localhost:8765
 ```
+
+Port **8765 matters**: it's in the relay Worker's CORS allowlist, so the web relay works against the live Worker during local dev (two browsers / a normal + incognito window simulate the two players). For relay work specifically, `cd relay && npx wrangler tail` streams live Worker request logs, and `npx wrangler dev` runs the Worker locally against a simulated KV.
