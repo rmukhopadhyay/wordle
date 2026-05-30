@@ -87,7 +87,7 @@ In-person on one shared device. Each "handoff" is a physical pass.
 
 1. **Setup**: Enter both player names (Player 1 = device-holder/initiator, Player 2 = opponent)
 2. **Mode chooser**: Pick Pass & Play (vs Remote)
-3. **Word entry — Player 1 (initiator)**: Enters 3 secret words for Player 2 to guess. Words must be in `ANSWERS`. Inputs are masked (password type) with an eye toggle. All 3 must be different.
+3. **Word entry — Player 1 (initiator)**: Enters 3 secret words for Player 2 to guess. Words must be in `ANSWERS`. Inputs are masked by an overlay (see "Word-entry masking" below) with an eye toggle. All 3 must be different.
 4. **Handoff**: Pass device to Player 2
 5. **Word entry — Player 2**: Enters 3 words for Player 1
 6. **Handoff**: Pass device back to Player 1 to start Round 1
@@ -108,7 +108,7 @@ The reducer state is **pointer + dict**: one `currentGameId` and a `games` map k
 ```js
 {
   screen: 'home' | 'setup' | 'mode-chooser' | 'accept-challenge'
-        | 'word-entry' | 'handoff' | 'share'
+        | 'word-entry' | 'handoff' | 'share' | 'review'
         | 'game' | 'solo-summary' | 'round-summary' | 'game-over',
   currentGameId: null | string,
   games: { [gameId]: Game },
@@ -125,9 +125,10 @@ The reducer state is **pointer + dict**: one `currentGameId` and a `games` map k
   players: [p1, p2],
   challengeFor: [[w0,w1,w2], [w0,w1,w2]],  // [guesserIdx][roundIdx]
   results: [[r,r],[r,r],[r,r]],            // [roundIdx][playerIdx]
-  round, turn, wordEntryPhase,
+  round, turn, wordEntryPhase,             // wordEntryPhase: 0=P1 sets, 1=P2 sets
   target, guesses[], scores[][], current, over, won,
   turnFor, turnCounter,                    // remote-only
+  reviewBoard,                             // sender's just-played snapshot {p,r,gs,sc,tg}; cleared by REVIEW_DONE
   myRole,                                  // per-device (0|1); stored in disk wrapper, NOT encoded
   _lastUpdate,                             // transient: sort key for the active-games list
 }
@@ -147,7 +148,7 @@ Components read the active game via `getCurrentGame(state)`; reducer actions mut
 
 ## Remote 2-player mode (mode `'r'`)
 
-Same per-game shape as local 2P, but each device-handoff is replaced by sharing a URL. URL format: `<base>#r:<encodedGame>`. The hash is read once on App mount (after auth), dispatched as `LOAD_FROM_URL`, then stripped via `history.replaceState`.
+Same per-game shape as local 2P, but each device-handoff is replaced by sharing a URL. URL format: `<base>#r:<encodedGame>`. The hash is read on App mount (after auth) AND on every `hashchange` and `visibilitychange` event, dispatched as `LOAD_FROM_URL`, then stripped via `history.replaceState`. The listeners are critical: on iOS Safari (and sometimes Android Chrome) tapping a share link with the app already open focuses the existing tab and updates `location.hash` in place instead of reloading — without those listeners the UI would silently stay stale until the user reloaded or logged out and back in.
 
 Turn order (initiator = P1, plays first):
 1. P1 enters both names → ModeChooser → picks Remote → WordEntry → enters 3 secret words for P2 → `WORD_ENTRY_DONE` for mode `'r'` → ShareScreen
@@ -156,14 +157,24 @@ Turn order (initiator = P1, plays first):
 4. P2 opens link → game R1 → plays → both rounds done, eval determines next → ShareScreen
 5. … alternates through R2, R3 → game-over
 
-`advanceRemoteAfterTurn(g, results, justWon)` computes the state updates that position the URL recipient *exactly* at the right step (their target, their turn). If P1 just played, swap to P2's turn for the same round. If P2 just played and round eval continues, advance to next round at P1's turn 0. If asymmetric stump or last round, mark over.
+`advanceRemoteAfterTurn(g, results, justWon)` computes the state updates that position the URL recipient *exactly* at the right step (their target, their turn). If P1 just played, swap to P2's turn for the same round. If P2 just played and round eval continues, keep state at "round-summary handoff" (don't advance — the receiver advances via REMOTE_ADVANCE_NEXT_ROUND). If asymmetric stump or last round, mark `over` true. In every case it also captures a snapshot of the sender's just-played board into `reviewBoard` so the receiver can see it.
 
-`turnFor` indicates which player the URL is meant for; `turnCounter` is a monotonic per-game counter (Phase 2 stores it but doesn't yet enforce divergence detection — see open work below).
+`turnFor` indicates which player the URL is meant for; `turnCounter` is a monotonic per-game counter (stored but not yet enforced for divergence detection — see open work below).
+
+### End-of-game share affordance
+
+When `REVEAL_DONE` produces `over: true` in remote mode, the **sender** goes to `game-over` (not `share`) and the `GameOver` component embeds the full share UI — URL, Copy Link, Show QR Code, Web Share when available. The change came from a real bug: a player tapped past the standalone share screen, the receiver never got the final result, and the game appeared stuck for them.
+
+`dropLeavingCurrent` keeps a finished remote game in the dict when the sender still hasn't shared (`turnFor !== myRole`), so they can resume + re-share via the active-games list. Finished remote receivers and finished local matches are still dropped on leave.
+
+### Review screen
+
+After the sender finishes a round turn and shares the URL, the recipient lands on a `ReviewBoard` component first — it shows the sender's actual guesses and tile colors against the receiver's secret word, plus "Bob solved it in 3!" / "Bob was stumped." and a Continue button. Tapping Continue dispatches `REVIEW_DONE`, which clears `reviewBoard` and routes to whatever would have applied otherwise (`game`, `round-summary`, or `game-over`). The snapshot lives in the encoded URL as a compact `rb` field (player index, round, guesses, single-char score codes, target). The sender never sees `'review'` — `REVEAL_DONE` explicitly sets their screen to share/round-summary/game-over; `RESUME_GAME` only routes to review when `turnFor === myRole`.
 
 ### Open work / known gaps (deferred)
 
-- **No "this link is stale" detection.** A receiver opening an older link silently overwrites their state.
-- **No anti-peek for secret words.** A curious opponent can `atob()` the hash and see upcoming words.
+- **No "this link is stale" detection.** A receiver opening an older link silently overwrites their state. `turnCounter` is encoded in every URL specifically to make this fixable later — compare incoming vs. local and prompt before overwriting.
+- **No anti-peek for secret words.** A curious opponent can decompress the hash and see upcoming words. Honor-system for friends-and-family use.
 
 ## myRole (per-device perspective)
 
@@ -232,20 +243,22 @@ Handoff `next` is stored as `{type: 'START_TURN', round, player}` (data, not a f
 | `AcceptChallenge` | `accept-challenge` | Opponent's first turn after opening a fresh challenge link: enters 3 words, sends back |
 | `WordEntry` | `word-entry` | 3 masked inputs, eye toggle per row (pass-and-play word entry) |
 | `Handoff` | `handoff` | Reads `state.handoff.next` and dispatches it on click (pass-and-play only) |
-| `ShareScreen` | `share` | URL + QR + Copy Link + (when available) Web Share API. Replaces `Handoff` for remote mode |
+| `ShareScreen` | `share` | URL (line-clamped to 2 lines + ellipsis) + QR + Copy Link + (when available) Web Share API. Replaces `Handoff` for remote mode |
+| `ReviewBoard` | `review` | Opponent's just-played board snapshot for the receiver; Continue → REVIEW_DONE |
 | `Game` | `game` | Board + keyboard. Owns reveal animation timing, dispatches `REVEAL_DONE` |
 | `SoloSummary` | `solo-summary` | Result + word + Play Again / Change Mode + 2-Player CTA |
 | `RoundSummary` | `round-summary` | Scoreboard. Local-2P button advances to handoff; remote-sender button advances to share; remote-receiver button advances to next round |
-| `GameOver` | `game-over` | Stump / guess-total / tie outcome + final scoreboard |
+| `GameOver` | `game-over` | Stump / guess-total / tie outcome + final scoreboard. **Remote sender** (turnFor !== myRole) also gets the embedded share UI |
 | `Scoreboard` | (shared) | Used by RoundSummary and GameOver |
 | `TopBar` | (shared) | Unified header on every screen except `login` & `home`. Owns the menu/home button. |
 | `ActiveGames` | (shared, on Home) | List of in-progress games sorted by most recent activity; tap to resume, × to dismiss |
+| `Disclaimer` | (shared, on Login + Home) | Small attribution + IP-respect notice ("Inspired by Wordle® by The New York Times Company...") |
 
 ### TopBar and the menu confirmation rule
 
 `TopBar` props: `state`, `dispatch`, optional `title`, `badge` (chip), `meta` (plain text under title), `right` (action node, e.g. solo's New Game). It renders a `⌂ Menu` button on the left that always goes home — but confirms first if a 2-player match is in progress.
 
-"In progress" = `isInProgressMatch(state)`: `getCurrentGame(state)` exists, its `mode` is `'l'` or `'r'`, `players[0]` is set, and `screen !== 'game-over'`. That covers word-entry, accept-challenge, handoff, share, game (2P), and round-summary — every screen where bailing out would discard a live match. Pass-and-play setup is in 2P mode but `players[0]` is empty until SETUP_DONE creates the game, so it skips the confirm. Remote setup never has a current game yet, so it also skips. Game-over and solo-summary skip it because the match (or solo round) is already done.
+"In progress" = `isInProgressMatch(state)`: `getCurrentGame(state)` exists, its `mode` is `'l'` or `'r'`, `players[0]` is set, and `screen !== 'game-over'`. That covers mode-chooser, word-entry, accept-challenge, handoff, share, game (2P), round-summary, and review — every screen where bailing out would discard a live match. The Setup screen (before SETUP_DONE) has no current game yet, so it skips the confirm. Game-over and solo-summary skip because the match (or solo round) is already done.
 
 ---
 
@@ -264,7 +277,10 @@ The reducer marks `state.revealing = true` when a guess is submitted. The `Game`
 `REVEAL_DONE` clears `revealing`, sets `over`/`won`, and routes by mode:
 - **Solo**: transition to `solo-summary`.
 - **Local 2P**: set `pendingContinue` (game screen shows a Continue overlay after a 1.8 s delay).
-- **Remote 2P**: compute the next-player state via `advanceRemoteAfterTurn`, then go to `share` — or to `round-summary` first if both players just finished a round and round eval says continue.
+- **Remote 2P**: compute the next-player state via `advanceRemoteAfterTurn` (which also snapshots the just-played board into `reviewBoard`), then choose screen:
+  - **Game over** → `game-over` (with embedded share UI for the sender)
+  - **Both finished this round, eval = continue** → `round-summary`
+  - **Otherwise (mid-round handoff)** → `share`
 
 ---
 
@@ -273,11 +289,39 @@ The reducer marks `state.revealing = true` when a guess is submitted. The `Game`
 - Viewport meta includes `user-scalable=no, maximum-scale=1` to prevent double-tap zoom
 - `touch-action: manipulation` on all keys and buttons to kill the 300 ms tap delay
 - `overflow: hidden` + `overscroll-behavior: none` on html/body — keeps the game screen pinned (no rubber-banding while playing)
-- **Scrollable non-game screens.** Because the body is `overflow: hidden`, every screen whose content can grow taller than the viewport (`#s-setup`, `#s-remote-setup`, `#s-accept-challenge`, `#s-word-entry`, `#s-home`, `#s-share`, `#s-handoff`, `#s-round-summary`, `#s-game-over`, `#s-solo-summary`) gets `height: 100dvh; overflow-y: auto` so it scrolls internally. The inner body containers use `justify-content: safe center` — short content vertically centers, overflowing content pins to flex-start so the top header and bottom action button are both reachable.
+- **Scrollable non-game screens.** Because the body is `overflow: hidden`, every screen whose content can grow taller than the viewport (`#s-login`, `#s-setup`, `#s-mode-chooser`, `#s-accept-challenge`, `#s-word-entry`, `#s-home`, `#s-share`, `#s-handoff`, `#s-round-summary`, `#s-game-over`, `#s-solo-summary`, `#s-review`) gets `height: 100dvh; overflow-y: auto` so it scrolls internally. The inner body containers use `justify-content: safe center` — short content vertically centers, overflowing content pins to flex-start so the top header and bottom action button are both reachable.
 - `min-height: 100dvh` on `#s-game` to account for Safari browser chrome
 - Tile size uses `clamp(44px, calc((100vw - 52px) / 5), 62px)` — scales on narrow screens
 - Keyboard uses `flex: 1` keys with 2px side padding so keys fill the viewport width
 - Keyboard layout is 3 rows: QWERTYUIOP / ASDFGHJKL / Enter · ZXCVBNM · ⌫ (action keys are 1.5× a letter key, via `.key.wide`)
+
+---
+
+## Word-entry masking
+
+The 3-word inputs on `WordEntry` and `AcceptChallenge` need to be hidden from a peeking opponent without triggering password-manager prompts. **We don't use `type="password"`** (browser saves a credential prompt) and **we don't use `-webkit-text-security: disc`** (iOS Safari briefly reveals the last typed character — Apple's "show last char" carry-over from real password fields).
+
+Instead:
+1. Input is `type="text"` with `autocomplete="off"`, `autocapitalize="characters"`, `autocorrect="off"`, `spellcheck="false"`, and no `name` attribute
+2. CSS class `.masked` sets `color: transparent; caret-color: var(--text)` so the input is invisible-but-typable with a visible cursor
+3. A `pointer-events: none` `.word-input-mask` div is absolutely positioned over the input and renders one `●` per character in the current value
+4. The eye toggle just adds/removes the `masked` class
+
+No browser quirks possible because we render the dots ourselves.
+
+---
+
+## Recent decisions worth knowing
+
+These came up during iterative play-testing and informed the current state of the code — useful context for picking up future work.
+
+- **2P entry flow is unified** through Setup → ModeChooser → WordEntry. The bespoke "Play Remotely" entry and `RemoteSetup` component were removed in favor of the unified path with a `mode-chooser` step that flips the placeholder game's mode to `'r'` or `'l'`.
+- **Initiator (P1) sets words first in BOTH 2P modes.** `wordEntryPhase` semantics flipped: 0 = initiator setting, 1 = opponent setting. (Old: P2 set first in pass-and-play.)
+- **End-of-game share UI lives on `game-over`**, not on a separate share screen, because users tapped past the share screen without sharing.
+- **Finished remote games aren't dropped when the sender hasn't shared yet** — they show "Send final result to X" in the active-games list, tappable to re-share.
+- **Hashchange + visibilitychange listeners on App** are load-bearing for the iOS in-tab navigation case. Without them, share links sometimes silently fail to update.
+- **Solo summary copy was reverted** from a "warmup" theme to the original `Genius!`/`A hole-in-one. Legendary.` etc. The CTA below ("Ready for a real challenge? ⚔ 2 Player") is kept.
+- **The disclaimer** (Wordle® attribution + fair-use notice) was a deliberate add — keep it on `Login` and `Home`.
 
 ---
 
