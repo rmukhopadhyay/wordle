@@ -173,6 +173,17 @@
                text-decoration:underline;text-underline-offset:3px;padding:4px 8px;
                touch-action:manipulation;}
     .qr-toggle:hover{color:var(--text);}
+    /* Relay-primary handoff: sync chip + demoted nudge */
+    .relay-share{display:flex;flex-direction:column;align-items:center;gap:14px;
+                 width:100%;}
+    .sync-chip{font-size:.72rem;letter-spacing:.06em;text-transform:uppercase;
+               padding:5px 14px;border-radius:999px;border:1px solid var(--border);
+               color:var(--muted);}
+    .sync-chip.synced{color:var(--correct);border-color:var(--correct);}
+    .sync-chip.failed{color:#d4a017;border-color:#d4a017;text-transform:none;
+                      letter-spacing:normal;font-size:.8rem;}
+    .rs-wait{font-size:.85rem;color:var(--muted);}
+    .ag-warn{color:#d4a017;}
 
     /* Setup / accept-challenge / mode-chooser reuse setup-body + we-* styles */
     #s-accept-challenge,#s-mode-chooser{min-height:100vh;}
@@ -716,16 +727,21 @@
     const RELAY_URL = 'https://twordle-relay.rmukhopadhyay.workers.dev';   // empty string disables the relay
     const RELAY_POLL_MS = 6000;
 
+    // Returns true if the opponent can now fetch a state at least as new as
+    // ours: 200 = stored, 409 = the relay already held this tc or newer (their
+    // device has it / has moved past it). Both count as "delivered" for the
+    // sync indicator. Any error / disabled relay → false (the UI then nudges).
     async function relayPut(game) {
-      if (!RELAY_URL || !game || game.mode !== 'r' || game.turnCounter === undefined) return;
+      if (!RELAY_URL || !game || game.mode !== 'r' || game.turnCounter === undefined) return false;
       try {
-        await fetch(RELAY_URL + '/g/' + encodeURIComponent(game.id), {
+        const res = await fetch(RELAY_URL + '/g/' + encodeURIComponent(game.id), {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ v: encodeGame(game), tc: game.turnCounter }),
           keepalive: true,
         });
-      } catch (e) { /* best-effort — the share link is the fallback */ }
+        return res.ok || res.status === 409;
+      } catch (e) { return false; }  // best-effort — the share link is the fallback
     }
 
     async function relayGet(id) {
@@ -1482,11 +1498,23 @@
         };
       }, [authed]);
 
-      // Relay push: whenever we land on a remote handoff screen (the moments we
-      // already show the share UI), push the encoded state so the opponent's
-      // device can pick it up without a hand-shuttled link. Deduped on the exact
-      // encoded blob so we don't re-PUT the same state on incidental re-renders.
-      // Best-effort — failure just leaves the manual share link as the fallback.
+      // Per-game outgoing-sync status: 'syncing' | 'synced' | 'failed'. Lives
+      // outside the reducer (like auth) so it's never persisted or encoded; it
+      // only drives the sync chip / nudge affordance on the waiting screens.
+      const [syncStatus, setSyncStatus] = useState({});
+      const stateRef = useRef(state); stateRef.current = state;
+      const syncStatusRef = useRef(syncStatus); syncStatusRef.current = syncStatus;
+
+      const pushAndTrack = useCallback((g) => {
+        const id = g.id;
+        setSyncStatus(s => ({ ...s, [id]: 'syncing' }));
+        relayPut(g).then(ok => setSyncStatus(s => ({ ...s, [id]: ok ? 'synced' : 'failed' })));
+      }, []);
+
+      // Relay push: whenever we land on a remote sender-handoff screen, push the
+      // encoded state so the opponent's device picks it up without a hand-shuttled
+      // link. Deduped on the exact encoded blob so we don't re-PUT on incidental
+      // re-renders. Best-effort — failure just leaves the manual link as fallback.
       const lastPushedRef = useRef({});
       useEffect(() => {
         if (!authed || !RELAY_URL) return;
@@ -1503,8 +1531,24 @@
         const enc = encodeGame(g);
         if (lastPushedRef.current[g.id] === enc) return;
         lastPushedRef.current[g.id] = enc;
-        relayPut(g);
+        pushAndTrack(g);
       }, [state, authed]);
+
+      // Retry a failed outgoing push when the tab regains focus (e.g. the network
+      // came back at the airport). Reads via refs so it doesn't churn listeners.
+      useEffect(() => {
+        if (!authed || !RELAY_URL) return;
+        const onVis = () => {
+          if (document.hidden) return;
+          const g = getCurrentGame(stateRef.current);
+          if (!g || g.mode !== 'r' || g.myRole === undefined) return;
+          if (g.turnFor === g.myRole) return;
+          if (syncStatusRef.current[g.id] !== 'failed') return;
+          pushAndTrack(g);
+        };
+        document.addEventListener('visibilitychange', onVis);
+        return () => document.removeEventListener('visibilitychange', onVis);
+      }, [authed]);
 
       // Relay pull: for any match where we're waiting on the opponent, poll the
       // relay on an interval (and immediately on focus) and load a turn the
@@ -1548,19 +1592,19 @@
       if (!authed) return html`<${Login} onSuccess=${() => setAuthed(true)} />`;
 
       switch (state.screen) {
-        case 'home':              return html`<${Home} state=${state} dispatch=${dispatch} onLogout=${onLogout} />`;
+        case 'home':              return html`<${Home} state=${state} dispatch=${dispatch} onLogout=${onLogout} syncStatus=${syncStatus} />`;
         case 'setup':             return html`<${Setup} state=${state} dispatch=${dispatch} />`;
         case 'mode-chooser':      return html`<${ModeChooser} state=${state} dispatch=${dispatch} />`;
         case 'accept-challenge':  return html`<${AcceptChallenge} state=${state} dispatch=${dispatch} />`;
         case 'word-entry':        return html`<${WordEntry} state=${state} dispatch=${dispatch} />`;
         case 'handoff':           return html`<${Handoff} state=${state} dispatch=${dispatch} />`;
-        case 'share':             return html`<${ShareScreen} state=${state} dispatch=${dispatch} />`;
+        case 'share':             return html`<${ShareScreen} state=${state} dispatch=${dispatch} syncStatus=${syncStatus} />`;
         case 'review':            return html`<${ReviewBoard} state=${state} dispatch=${dispatch} />`;
         case 'game':              return html`<${Game} state=${state} dispatch=${dispatch} />`;
         case 'solo-summary':      return html`<${SoloSummary} state=${state} dispatch=${dispatch} />`;
-        case 'round-summary':     return html`<${RoundSummary} state=${state} dispatch=${dispatch} />`;
-        case 'game-over':         return html`<${GameOver} state=${state} dispatch=${dispatch} />`;
-        default:                  return html`<${Home} state=${state} dispatch=${dispatch} onLogout=${onLogout} />`;
+        case 'round-summary':     return html`<${RoundSummary} state=${state} dispatch=${dispatch} syncStatus=${syncStatus} />`;
+        case 'game-over':         return html`<${GameOver} state=${state} dispatch=${dispatch} syncStatus=${syncStatus} />`;
+        default:                  return html`<${Home} state=${state} dispatch=${dispatch} onLogout=${onLogout} syncStatus=${syncStatus} />`;
       }
     }
 
@@ -1628,7 +1672,7 @@
       `;
     }
 
-    function Home({ state, dispatch, onLogout }) {
+    function Home({ state, dispatch, onLogout, syncStatus }) {
       return html`
         <div id="s-home" class="screen">
           <div class="home-body">
@@ -1636,7 +1680,7 @@
             <div class="sub">Play with a friend — across the room or across the world</div>
             <button class="btn btn-g" onClick=${() => dispatch({ type: 'PICK_TWO_PLAYER' })}>⚔ 2 Player</button>
             <button class="btn btn-o" onClick=${() => dispatch({ type: 'PICK_SOLO' })}>Solo Play</button>
-            <${ActiveGames} state=${state} dispatch=${dispatch} />
+            <${ActiveGames} state=${state} dispatch=${dispatch} syncStatus=${syncStatus} />
             <button id="logout-btn" onClick=${onLogout}>Sign out</button>
           </div>
           <${Disclaimer} />
@@ -1658,7 +1702,9 @@
             <button class="btn btn-g" onClick=${() => dispatch({ type: 'PICK_REMOTE_VARIANT' })}>
               ⚔ Remote
             </button>
-            <div class="mc-hint">Different devices. You'll share a link or QR code after each turn.</div>
+            <div class="mc-hint">${RELAY_URL
+              ? html`Different devices. Send one invite link to start — after that, turns sync automatically.`
+              : html`Different devices. You'll share a link or QR code after each turn.`}</div>
             <button class="btn btn-o" onClick=${() => dispatch({ type: 'PICK_PASS_AND_PLAY' })}>
               ⚔ Pass & Play
             </button>
@@ -1711,7 +1757,7 @@
       return null;
     }
 
-    function ActiveGames({ state, dispatch }) {
+    function ActiveGames({ state, dispatch, syncStatus }) {
       const list = Object.values(state.games)
         // Hide leftovers: blank solos and 2P placeholders where no words were
         // entered (cleaned up on GO_HOME, but defensive against tab-close).
@@ -1741,7 +1787,10 @@
                 <div class="ag-icon">${d.icon}</div>
                 <div class="ag-text">
                   <div class="ag-title">${d.title}</div>
-                  <div class=${`ag-status ${d.mine ? 'mine' : ''}`}>${d.status}</div>
+                  <div class=${`ag-status ${d.mine ? 'mine' : ''}`}>
+                    ${d.status}${syncStatus?.[g.id] === 'failed'
+                      ? html` · <span class="ag-warn">⚠ not sent</span>` : ''}
+                  </div>
                 </div>
               </button>
               <button class="ag-dismiss" onClick=${() => onDismiss(g.id, d.title)} title="Remove">×</button>
@@ -1863,85 +1912,126 @@
       `;
     }
 
-    // Replaces the local Handoff screen when it's time to send the URL out.
-    // Phase 2: copy-link button only. Phase 3 adds Web Share API + QR.
-    function ShareScreen({ state, dispatch }) {
-      const g = getCurrentGame(state) ?? emptyGame();
+    // Shared share/sync affordance for remote handoffs, in two variants:
+    //   'invite'  — prominent share UI for the moments a manual share is the
+    //               real transport: the mandatory first invite, or ANY handoff
+    //               when the relay is disabled. Big Share / Copy + QR.
+    //   'waiting' — relay-primary: a sync chip (Syncing… / Synced ✓ / failed)
+    //               plus a demoted "Nudge" button with the raw link + QR tucked
+    //               behind a toggle. The relay does the real delivery; the link
+    //               is just a notification poke (we have no push) / offline path.
+    //               On sync failure the nudge is elevated, since that's exactly
+    //               when the manual fallback matters.
+    function RelayShareBlock({ game, syncStatus, variant }) {
+      const g = game;
+      const me = g.myRole ?? 0;
+      const opp = g.players[1 - me] || 'your opponent';
       const [copied, setCopied] = useState(false);
-      const [showQr, setShowQr] = useState(false);
+      const [showLink, setShowLink] = useState(variant === 'invite');
       const url = useMemo(() => buildShareUrl(g), [g]);
-      const qr = useMemo(() => showQr ? renderQRPath(url) : null, [showQr, url]);
-      const recipient = g.players[g.turnFor ?? 1] || 'your opponent';
+      const qr = useMemo(() => showLink ? renderQRPath(url) : null, [showLink, url]);
 
-      // Heading / sub depend on what just happened on this device.
-      let heading, sub;
-      if (g.over) {
-        heading = 'Match over!';
-        sub = `Share the final result with <strong>${recipient}</strong> so they can see how it ended.`;
-      } else if (g.turnCounter === 1) {
-        heading = 'Challenge ready';
-        sub = `Send this to <strong>${recipient}</strong> to accept the challenge and play.`;
-      } else if (g.turnCounter === 2 && g.guesses.length === 0 && g.round === 0 && g.turn === 0) {
-        heading = 'Words locked in';
-        sub = `Send this back to <strong>${recipient}</strong> to start Round 1.`;
-      } else {
-        heading = 'Your turn done';
-        sub = `Send this to <strong>${recipient}</strong> so they can take their turn.`;
-      }
-
-      const shareText = g.over
-        ? `The final result from our Twordle match`
+      const shareText = g.over ? `The final result from our Twordle match`
         : (g.turnCounter === 1 ? `I'm challenging you to Twordle!` : `Your turn in Twordle`);
-
-      // Feature-detect Web Share API. Falls back to copy when unavailable
-      // (desktop browsers without share support) or when the user cancels.
-      const canWebShare = typeof navigator !== 'undefined'
-        && typeof navigator.share === 'function'
+      const canWebShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function'
         && (!navigator.canShare || navigator.canShare({ url, text: shareText }));
 
       const copy = async () => {
-        try { await navigator.clipboard.writeText(url); }
-        catch (e) { /* swallow — we'll show success indication anyway */ }
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1800);
+        try { await navigator.clipboard.writeText(url); } catch (e) {}
+        setCopied(true); setTimeout(() => setCopied(false), 1800);
+      };
+      const share = async () => {
+        try { await navigator.share({ url, text: shareText, title: 'Twordle' }); } catch (e) {}
       };
 
-      const share = async () => {
-        try {
-          await navigator.share({ url, text: shareText, title: 'Twordle' });
-        } catch (e) {
-          // User canceled, or the picker failed — silently fall through.
-          // No need to surface this; they can hit Copy Link instead.
-        }
-      };
+      const linkReveal = html`
+        ${showLink && html`
+          ${qr && html`
+            <div class="qr-box">
+              <svg viewBox=${`0 0 ${qr.size} ${qr.size}`} xmlns="http://www.w3.org/2000/svg">
+                <rect width=${qr.size} height=${qr.size} fill="white" />
+                <path d=${qr.d} fill="black" />
+              </svg>
+            </div>
+          `}
+          <div class="share-url" onClick=${copy}>${url}</div>
+        `}
+      `;
+
+      if (variant === 'invite') {
+        return html`
+          <div class="relay-share">
+            ${linkReveal}
+            ${canWebShare && html`<button class="btn btn-g" onClick=${share}>Share →</button>`}
+            <button class=${`btn ${canWebShare ? 'btn-o' : 'btn-g'}`} onClick=${copy}>
+              ${copied ? 'Copied! ✓' : 'Copy Link'}
+            </button>
+            <button class="qr-toggle" onClick=${() => setShowLink(s => !s)}>
+              ${showLink ? 'Hide QR Code' : 'Show QR Code'}
+            </button>
+          </div>
+        `;
+      }
+
+      // variant === 'waiting'
+      const status = syncStatus?.[g.id] || 'syncing';
+      const failed = status === 'failed';
+      const chip = failed
+        ? html`<div class="sync-chip failed">⚠ Couldn't reach ${opp}'s device</div>`
+        : status === 'synced'
+        ? html`<div class="sync-chip synced">Synced ✓</div>`
+        : html`<div class="sync-chip syncing">Syncing…</div>`;
+      return html`
+        <div class="relay-share">
+          ${chip}
+          <button class=${`btn ${failed ? 'btn-g' : 'btn-o'}`} onClick=${canWebShare ? share : copy}>
+            ${copied ? 'Copied! ✓' : `${failed ? 'Send' : 'Nudge'} ${opp} a link`}
+          </button>
+          <button class="qr-toggle" onClick=${() => setShowLink(s => !s)}>
+            ${showLink ? 'Hide link & QR' : 'Show link & QR'}
+          </button>
+          ${linkReveal}
+        </div>
+      `;
+    }
+
+    // Replaces the local Handoff screen when it's time to send the URL out.
+    // With the relay on, most handoffs are "waiting" (auto-delivered); only the
+    // first invite (opponent hasn't entered words yet) needs a manual share.
+    function ShareScreen({ state, dispatch, syncStatus }) {
+      const g = getCurrentGame(state) ?? emptyGame();
+      const recipient = g.players[g.turnFor ?? 1] || 'your opponent';
+      const relayOn = !!RELAY_URL;
+      // Manual share is the real transport only for the first invite (opponent
+      // hasn't entered words yet, so they can't be polling) or when the relay is
+      // off. Everything else is relay-delivered → show the waiting affordance.
+      const firstInvite = (g.challengeFor[0]?.length ?? 0) === 0;
+      const variant = (firstInvite || !relayOn) ? 'invite' : 'waiting';
+
+      let icon, heading, sub;
+      if (variant === 'invite') {
+        icon = '📨';
+        heading = g.turnCounter === 1 ? `Invite ${recipient}` : 'Send the link';
+        sub = g.turnCounter === 1
+          ? `Send this to <strong>${recipient}</strong> to accept and play.${relayOn ? ' After this first invite, turns sync on their own.' : ''}`
+          : `Send this to <strong>${recipient}</strong> to continue the match.`;
+      } else {
+        icon = '⏳';
+        heading = `Waiting on ${recipient}`;
+        sub = `Your move is in — <strong>${recipient}</strong> gets it automatically. Nudge them if you like, or just sit tight; this updates on its own.`;
+      }
 
       return html`
         <div id="s-share" class="screen">
-          <${TopBar} state=${state} dispatch=${dispatch} badge="Share" />
+          <${TopBar} state=${state} dispatch=${dispatch} badge=${variant === 'invite' ? 'Invite' : 'Waiting'} />
           <div class="ho-body">
-            <div class="ho-icon">📨</div>
+            <div class="ho-icon">${icon}</div>
             <h2>${heading}</h2>
             <p dangerouslySetInnerHTML=${{ __html: sub }}></p>
-            ${showQr && qr && html`
-              <div class="qr-box">
-                <svg viewBox=${`0 0 ${qr.size} ${qr.size}`} xmlns="http://www.w3.org/2000/svg">
-                  <rect width=${qr.size} height=${qr.size} fill="white" />
-                  <path d=${qr.d} fill="black" />
-                </svg>
-              </div>
-            `}
-            <div class="share-url" onClick=${copy}>${url}</div>
-            ${canWebShare && html`
-              <button class="btn btn-g" onClick=${share}>Share →</button>
-              <button class="btn btn-o" onClick=${copy}>${copied ? 'Copied! ✓' : 'Copy Link'}</button>
-            `}
-            ${!canWebShare && html`
-              <button class="btn btn-g" onClick=${copy}>${copied ? 'Copied! ✓' : 'Copy Link'}</button>
-            `}
-            <button class="qr-toggle" onClick=${() => setShowQr(s => !s)}>
-              ${showQr ? 'Hide QR Code' : 'Show QR Code'}
+            <${RelayShareBlock} game=${g} syncStatus=${syncStatus} variant=${variant} />
+            <button class="btn btn-o" onClick=${() => dispatch({ type: 'GO_HOME' })}>
+              ${variant === 'waiting' ? 'Back to games' : 'Done'}
             </button>
-            <button class="btn btn-o" onClick=${() => dispatch({ type: 'GO_HOME' })}>Done</button>
           </div>
         </div>
       `;
@@ -2378,7 +2468,7 @@
       `;
     }
 
-    function RoundSummary({ state, dispatch }) {
+    function RoundSummary({ state, dispatch, syncStatus }) {
       const g = getCurrentGame(state) ?? emptyGame();
       const tp = { players: g.players, results: g.results };
       // We land here right after the second player finishes the round, so
@@ -2403,7 +2493,13 @@
         const opp = g.players[1 - me] || 'opponent';
         const isSender = me === g.turn;
         if (isSender) {
-          action = html`<button class="btn btn-g"
+          // Relay on: the round-summary already auto-pushed, so this is a waiting
+          // state, not a manual send. Relay off: keep the explicit send button.
+          action = RELAY_URL ? html`
+            <p class="rs-wait">Waiting on ${opp} to play Round ${next}…</p>
+            <${RelayShareBlock} game=${g} syncStatus=${syncStatus} variant="waiting" />
+            <button class="btn btn-o" onClick=${() => dispatch({ type: 'GO_HOME' })}>Back to games</button>
+          ` : html`<button class="btn btn-g"
                                 onClick=${() => dispatch({ type: 'GOTO_SHARE' })}>
             Send to ${opp} for Round ${next} →
           </button>`;
@@ -2437,7 +2533,7 @@
       `;
     }
 
-    function GameOver({ state, dispatch }) {
+    function GameOver({ state, dispatch, syncStatus }) {
       const g = getCurrentGame(state) ?? emptyGame();
       const tp = { players: g.players, results: g.results };
       const { type, winnerIdx, roundsPlayed, t0, t1 } = gameOverDetails(g);
@@ -2468,27 +2564,7 @@
         && g.myRole !== undefined && g.turnFor !== undefined
         && g.turnFor !== g.myRole;
       const opponent = g.mode === 'r' ? (g.players[1 - (g.myRole ?? 0)] || 'your opponent') : '';
-
-      const [copied, setCopied] = useState(false);
-      const [showQr, setShowQr] = useState(false);
-      const url = useMemo(() => isRemoteSender ? buildShareUrl(g) : '', [isRemoteSender, g]);
-      const qr = useMemo(() => (isRemoteSender && showQr) ? renderQRPath(url) : null,
-                         [isRemoteSender, showQr, url]);
-
-      const shareText = `The final result from our Twordle match`;
-      const canWebShare = isRemoteSender && typeof navigator !== 'undefined'
-        && typeof navigator.share === 'function'
-        && (!navigator.canShare || navigator.canShare({ url, text: shareText }));
-
-      const copy = async () => {
-        try { await navigator.clipboard.writeText(url); } catch (e) {}
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1800);
-      };
-      const share = async () => {
-        try { await navigator.share({ url, text: shareText, title: 'Twordle' }); }
-        catch (e) { /* canceled / unsupported — fall through to copy */ }
-      };
+      const relayOn = !!RELAY_URL;
 
       return html`
         <div id="s-game-over" class="screen">
@@ -2503,24 +2579,12 @@
             ${isRemoteSender && html`
               <div class="go-share">
                 <p class="go-share-prompt" dangerouslySetInnerHTML=${{
-                  __html: `📨 Send the final result to <strong>${opponent}</strong> so they can see how it ended.`
+                  __html: relayOn
+                    ? `The final result is on its way to <strong>${opponent}</strong>.`
+                    : `📨 Send the final result to <strong>${opponent}</strong> so they can see how it ended.`
                 }}></p>
-                ${showQr && qr && html`
-                  <div class="qr-box">
-                    <svg viewBox=${`0 0 ${qr.size} ${qr.size}`} xmlns="http://www.w3.org/2000/svg">
-                      <rect width=${qr.size} height=${qr.size} fill="white" />
-                      <path d=${qr.d} fill="black" />
-                    </svg>
-                  </div>
-                `}
-                <div class="share-url" onClick=${copy}>${url}</div>
-                ${canWebShare && html`<button class="btn btn-g" onClick=${share}>Share →</button>`}
-                <button class=${`btn ${canWebShare ? 'btn-o' : 'btn-g'}`} onClick=${copy}>
-                  ${copied ? 'Copied! ✓' : 'Copy Link'}
-                </button>
-                <button class="qr-toggle" onClick=${() => setShowQr(s => !s)}>
-                  ${showQr ? 'Hide QR Code' : 'Show QR Code'}
-                </button>
+                <${RelayShareBlock} game=${g} syncStatus=${syncStatus}
+                                    variant=${relayOn ? 'waiting' : 'invite'} />
               </div>
             `}
             <button class="btn btn-o" onClick=${() => dispatch({ type: 'GO_HOME' })}>
